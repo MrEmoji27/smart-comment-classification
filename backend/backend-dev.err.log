@@ -1,0 +1,8 @@
+C:\Users\mremo\OneDrive\Desktop\scc\scc\backend\main.py:242: DeprecationWarning: 
+        on_event is deprecated, use lifespan event handlers instead.
+
+        Read more about it in the
+        [FastAPI docs for Lifespan Events](https://fastapi.tiangolo.com/advanced/events/).
+        
+  @app.on_event("startup")
+WARNING:  You must pass the application as an import string to enable 'reload' or 'workers'.
