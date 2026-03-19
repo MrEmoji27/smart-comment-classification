@@ -1,4 +1,5 @@
 import { useEffect, useRef } from 'react';
+import anime from 'animejs';
 import { AlertCircle, AlertTriangle, Clock, Minus, Tag, TrendingDown, TrendingUp, Zap } from 'lucide-react';
 import './SingleResult.css';
 
@@ -7,7 +8,45 @@ export default function SingleResult({ result, runtimeLabel }) {
 
   useEffect(() => {
     if (!result || !cardRef.current) return;
-    cardRef.current.classList.add('animate-slide-in');
+
+    const root = cardRef.current;
+    const stagedNodes = root.querySelectorAll(
+      '.result-heading, .result-flags, .result-main, .confidence-title, .interactive-text-box, .word-summary-stats, .toxicity-bar-container, .confidence-trio'
+    );
+    const bars = root.querySelectorAll('.confidence-bar-fill, .conf-bar-fill');
+
+    anime.remove(stagedNodes);
+    anime.remove(bars);
+
+    const timeline = anime.timeline({
+      easing: 'easeOutExpo',
+    });
+
+    timeline.add({
+      targets: root,
+      opacity: [0, 1],
+      translateY: [14, 0],
+      duration: 320,
+    }).add({
+      targets: stagedNodes,
+      opacity: [0, 1],
+      translateY: [12, 0],
+      duration: 420,
+      delay: anime.stagger(55),
+    }, '-=120').add({
+      targets: bars,
+      scaleX: [0, 1],
+      duration: 560,
+      delay: anime.stagger(45),
+      easing: 'easeOutQuart',
+    }, '-=240');
+
+    return () => {
+      timeline.pause();
+      anime.remove(root);
+      anime.remove(stagedNodes);
+      anime.remove(bars);
+    };
   }, [result]);
 
   if (!result) return null;
