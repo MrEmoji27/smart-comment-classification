@@ -1,18 +1,19 @@
 .text-input-panel {
     padding: 32px;
+    animation: fadeIn 420ms var(--transition-slow) both;
 }
 
 .panel-title {
-    font-size: 22px;
-    font-weight: 700;
-    margin-bottom: 6px;
-    color: var(--text-primary);
+  font-size: 22px;
+  font-weight: 700;
+  margin-bottom: 6px;
+  color: var(--text-primary);
 }
 
 .panel-desc {
-    font-size: 14px;
-    color: var(--text-secondary);
-    margin-bottom: 24px;
+  font-size: 14px;
+  color: var(--text-secondary);
+  margin-bottom: 24px;
 }
 
 .textarea-wrapper {
@@ -20,8 +21,7 @@
     margin-bottom: 8px;
 }
 
-.text-area {
-    width: 100%;
+.mantine-textarea textarea {
     min-height: 100px;
     max-height: 240px;
     padding: 16px;
@@ -32,90 +32,113 @@
     font-family: var(--font-primary);
     font-size: 15px;
     line-height: 1.6;
-    resize: none;
-    transition: border-color var(--transition-base), box-shadow var(--transition-base);
-    outline: none;
+    transition:
+      border-color var(--transition-base),
+      box-shadow var(--transition-base),
+      transform var(--transition-base),
+      background-color var(--transition-base);
 }
 
-.text-area::placeholder {
+.mantine-textarea textarea::placeholder {
     color: var(--text-muted);
 }
 
-.text-area:focus {
+.mantine-textarea textarea:focus {
     border-color: var(--accent-blue);
     box-shadow: 0 0 0 3px rgba(88, 166, 255, 0.12);
+    transform: translateY(-1px);
 }
 
-.text-area.has-error {
+.mantine-textarea [data-error='true'] textarea {
     border-color: var(--negative);
     box-shadow: 0 0 0 3px rgba(248, 81, 73, 0.12);
 }
 
 .char-counter {
-    position: absolute;
-    bottom: 10px;
-    right: 14px;
-    font-family: var(--font-mono);
-    font-size: 12px;
-    color: var(--text-muted);
-    pointer-events: none;
+  position: absolute;
+  bottom: 10px;
+  right: 14px;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  color: var(--text-muted);
+  pointer-events: none;
 }
 
 .char-counter.counter-amber {
-    color: var(--neutral);
+  color: var(--neutral);
 }
 
 .char-counter.counter-red {
-    color: var(--negative);
+  color: var(--negative);
 }
 
 .input-error {
-    display: flex;
-    align-items: center;
-    gap: 6px;
-    color: var(--negative);
-    font-size: 13px;
-    margin-bottom: 12px;
-    animation: fadeIn 200ms ease-out;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--negative);
+  font-size: 13px;
+  margin-bottom: 12px;
+  animation: fadeIn 200ms ease-out;
 }
 
 .text-input-actions {
     display: flex;
     gap: 12px;
     margin-top: 16px;
+    align-items: center;
 }
 
-.text-input-actions .btn-primary {
+.text-input-actions .mantine-primary-button {
     flex: 1;
+    transition: transform var(--transition-fast), box-shadow var(--transition-base);
 }
 
-.text-input-actions .btn-secondary {
+.text-input-actions .mantine-primary-button:hover {
+    transform: translateY(-1px);
+    box-shadow: var(--shadow-sm);
+}
+
+.text-input-actions .mantine-primary-button:active {
+    transform: scale(0.985);
+}
+
+.text-input-actions button[data-variant='default'] {
     flex-shrink: 0;
+    transition: transform var(--transition-fast), border-color var(--transition-base);
+}
+
+.text-input-actions button[data-variant='default']:hover {
+    transform: translateY(-1px);
+}
+
+.text-input-actions button[data-variant='default']:active {
+    transform: scale(0.985);
 }
 
 .input-hint {
-    margin-top: 12px;
-    font-size: 12px;
-    color: var(--text-muted);
-    text-align: center;
+  margin-top: 12px;
+  font-size: 12px;
+  color: var(--text-muted);
+  text-align: center;
 }
 
 .input-hint kbd {
-    display: inline-block;
-    padding: 2px 6px;
-    font-family: var(--font-mono);
-    font-size: 11px;
-    background: var(--bg-card);
-    border: 1px solid var(--border-default);
-    border-radius: 4px;
-    margin: 0 2px;
+  display: inline-block;
+  padding: 2px 6px;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  background: var(--bg-card);
+  border: 1px solid var(--border-default);
+  border-radius: 4px;
+  margin: 0 2px;
 }
 
 .spinner {
-    width: 20px;
-    height: 20px;
-    border: 2px solid rgba(255, 255, 255, 0.3);
-    border-top-color: #fff;
-    border-radius: 50%;
-    animation: spin 0.6s linear infinite;
+  width: 20px;
+  height: 20px;
+  border: 2px solid rgba(255, 255, 255, 0.3);
+  border-top-color: #fff;
+  border-radius: 50%;
+  animation: spin 0.6s linear infinite;
 }

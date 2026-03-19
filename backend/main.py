@@ -24,10 +24,12 @@ Features:
 import time
 import uuid
 import io
+import logging
 import os
 import re
 import html
 import unicodedata
+from collections import Counter
 from typing import Optional
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException, BackgroundTasks, Request
@@ -35,9 +37,24 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 import pandas as pd
 import torch
-from transformers import pipeline, AutoTokenizer, AutoModelForSequenceClassification
+from transformers import pipeline, AutoTokenizer
 from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer
 import emoji
+
+LOGGER = logging.getLogger("smart_comment_classification")
+if not LOGGER.handlers:
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s %(levelname)s %(name)s %(message)s",
+    )
+
+APP_VERSION = "3.2"
+DEFAULT_SENTIMENT_FALLBACK_MODEL = "cardiffnlp/twitter-roberta-base-sentiment-latest"
+DEFAULT_LOCAL_MODERNBERT_PATH = os.path.join(
+    os.path.dirname(__file__),
+    "models",
+    "modernbert-sentiment",
+)
 
 # ──────────────────────────────────────
 # App Init
@@ -47,7 +64,7 @@ async def lifespan(app):
     load_model()
     yield
 
-app = FastAPI(title="Smart Comment Classification API", version="3.0", lifespan=lifespan)
+app = FastAPI(title="Smart Comment Classification API", version=APP_VERSION, lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
@@ -347,6 +364,51 @@ type_classifier = None
 emotion_classifier = None
 sarcasm_classifier = None
 vader_analyzer = SentimentIntensityAnalyzer()
+model_tokenizers: dict = {}
+model_registry: dict = {}
+model_status: dict = {}
+
+PIPELINE_DEVICE = 0 if torch.cuda.is_available() else -1
+MODEL_SPECS = {
+    "sentiment": {
+        "task": "sentiment-analysis",
+        "display_name": "Sentiment Model",
+        "top_k": None,
+        "max_tokens": 512,
+        "required": True,
+    },
+    "toxicity": {
+        "task": "text-classification",
+        "model": "unitary/toxic-bert",
+        "display_name": "Toxic-BERT",
+        "top_k": None,
+        "max_tokens": 512,
+        "required": True,
+    },
+    "type": {
+        "task": "zero-shot-classification",
+        "model": "facebook/bart-large-mnli",
+        "display_name": "BART MNLI",
+        "max_tokens": 1024,
+        "required": True,
+    },
+    "emotion": {
+        "task": "text-classification",
+        "model": "SamLowe/roberta-base-go_emotions",
+        "display_name": "GoEmotions",
+        "top_k": 5,
+        "max_tokens": 512,
+        "required": False,
+    },
+    "sarcasm": {
+        "task": "text-classification",
+        "model": "cardiffnlp/twitter-roberta-base-irony",
+        "display_name": "Twitter RoBERTa Irony",
+        "top_k": None,
+        "max_tokens": 512,
+        "required": False,
+    },
+}
 
 CANDIDATE_TYPES = [
     "asking a question or seeking information",
@@ -387,49 +449,216 @@ EMOTION_TYPE_BOOST = {
     "optimism": ("Feedback", 0.06),
 }
 
+def _get_primary_model_identifier(name: str) -> str:
+    if name == "sentiment":
+        return _get_configured_modernbert_model() or DEFAULT_SENTIMENT_FALLBACK_MODEL
+    spec = MODEL_SPECS[name]
+    if "model" in spec:
+        return spec["model"]
+    for candidate in spec.get("candidates", []):
+        if candidate.get("enabled") and candidate.get("model"):
+            return candidate["model"]
+    return ""
+
+def _get_configured_modernbert_model() -> str:
+    env_value = os.getenv("MODERNBERT_SENTIMENT_MODEL", "").strip()
+    if env_value:
+        return env_value
+
+    config_path = os.path.join(DEFAULT_LOCAL_MODERNBERT_PATH, "config.json")
+    if os.path.exists(config_path):
+        return DEFAULT_LOCAL_MODERNBERT_PATH
+    return ""
+
+def _resolve_model_candidates(name: str) -> list[dict]:
+    spec = MODEL_SPECS[name]
+    if name == "sentiment":
+        modernbert_model = _get_configured_modernbert_model()
+        return [
+            {
+                "name": "modernbert",
+                "model": modernbert_model,
+                "display_name": "ModernBERT Sentiment",
+                "enabled": bool(modernbert_model),
+            },
+            {
+                "name": "twitter_roberta",
+                "model": DEFAULT_SENTIMENT_FALLBACK_MODEL,
+                "display_name": "Twitter RoBERTa Sentiment",
+                "enabled": True,
+            },
+        ]
+    if "candidates" in spec:
+        return [
+            candidate for candidate in spec["candidates"]
+            if candidate.get("enabled") and candidate.get("model")
+        ]
+    return [{
+        "name": name,
+        "model": spec["model"],
+        "display_name": spec.get("display_name", spec["model"]),
+        "enabled": True,
+    }]
+
+def _set_model_availability(
+    name: str,
+    classifier,
+    error: Optional[str] = None,
+    actual_model: Optional[str] = None,
+    display_name: Optional[str] = None,
+    attempted_models: Optional[list[str]] = None,
+):
+    spec = MODEL_SPECS[name]
+    model_status[name] = {
+        "loaded": classifier is not None,
+        "required": spec["required"],
+        "model": actual_model or _get_primary_model_identifier(name),
+        "display_name": display_name or spec.get("display_name") or (actual_model or _get_primary_model_identifier(name)),
+        "max_tokens": spec["max_tokens"],
+        "error": error,
+        "attempted_models": attempted_models or [],
+    }
+
+def _load_pipeline(name: str):
+    spec = MODEL_SPECS[name]
+    attempted = []
+    last_error = None
+
+    for candidate in _resolve_model_candidates(name):
+        attempted.append(candidate["model"])
+        try:
+            tokenizer = AutoTokenizer.from_pretrained(candidate["model"], use_fast=True)
+            kwargs = {
+                "model": candidate["model"],
+                "tokenizer": tokenizer,
+                "device": PIPELINE_DEVICE,
+            }
+            if "top_k" in spec:
+                kwargs["top_k"] = spec["top_k"]
+            classifier = pipeline(spec["task"], **kwargs)
+            model_tokenizers[name] = tokenizer
+            model_registry[name] = classifier
+            _set_model_availability(
+                name,
+                classifier,
+                actual_model=candidate["model"],
+                display_name=candidate.get("display_name", candidate["model"]),
+                attempted_models=attempted,
+            )
+            return classifier
+        except Exception as exc:
+            last_error = exc
+            LOGGER.warning("Candidate model failed for %s: %s", name, candidate["model"])
+
+    raise RuntimeError(f"Unable to load {name} from candidates {attempted}: {last_error}")
+
+def truncate_for_model(text: str, model_name: str) -> tuple[str, dict]:
+    tokenizer = model_tokenizers.get(model_name)
+    spec = MODEL_SPECS[model_name]
+    if not text or tokenizer is None:
+        return text, {"truncated": False, "max_tokens": spec["max_tokens"], "input_tokens": 0}
+
+    encoded = tokenizer(
+        text,
+        truncation=True,
+        max_length=spec["max_tokens"],
+        return_overflowing_tokens=True,
+        return_attention_mask=False,
+    )
+    token_ids = encoded["input_ids"]
+    if token_ids and isinstance(token_ids[0], list):
+        token_ids = token_ids[0]
+    overflow = encoded.get("overflowing_tokens") or []
+    truncated = bool(overflow)
+    prepared = tokenizer.decode(
+        token_ids,
+        skip_special_tokens=True,
+        clean_up_tokenization_spaces=True,
+    ).strip()
+    return prepared, {
+        "truncated": truncated,
+        "max_tokens": spec["max_tokens"],
+        "input_tokens": len(token_ids),
+    }
+
+def _normalize_sentiment_output(result) -> dict:
+    scores = {"Positive": 0.0, "Neutral": 0.0, "Negative": 0.0}
+    items = result[0] if isinstance(result, list) and result and isinstance(result[0], list) else result
+    for item in items:
+        label = item["label"].lower()
+        if "positive" in label:
+            scores["Positive"] += item["score"]
+        elif "negative" in label:
+            scores["Negative"] += item["score"]
+        else:
+            scores["Neutral"] += item["score"]
+    total = sum(scores.values())
+    if total > 0:
+        scores = {k: round(v / total, 4) for k, v in scores.items()}
+    return scores
+
+def _extract_label_score(result, positive_labels: set[str]) -> float:
+    items = result[0] if isinstance(result, list) and result and isinstance(result[0], list) else result
+    for item in items:
+        if item["label"].lower() in positive_labels:
+            return item["score"]
+    return 0.0
+
+def _run_stage_batch(model_name: str, texts: list[str], **kwargs) -> tuple[list, float]:
+    classifier = model_registry.get(model_name)
+    if classifier is None:
+        return [None] * len(texts), 0.0
+
+    started = time.perf_counter()
+    results = classifier(texts, batch_size=min(16, max(1, len(texts))), **kwargs)
+    elapsed_ms = round((time.perf_counter() - started) * 1000, 2)
+    if len(texts) == 1:
+        if model_name == "type":
+            if isinstance(results, dict):
+                results = [results]
+        elif isinstance(results, dict):
+            results = [results]
+        elif isinstance(results, list) and results and isinstance(results[0], dict):
+            results = [results]
+    elif not isinstance(results, list):
+        results = [results]
+    return results, elapsed_ms
+
 def load_model():
     global sentiment_classifier, toxicity_classifier, type_classifier
     global emotion_classifier, sarcasm_classifier
-    try:
-        print("Loading Sentiment Model (twitter-roberta)...")
-        sentiment_classifier = pipeline(
-            "sentiment-analysis",
-            model="cardiffnlp/twitter-roberta-base-sentiment-latest",
-            top_k=None, device=-1
-        )
+    LOGGER.info("Loading NLP model stack on device=%s", PIPELINE_DEVICE)
+    for model_name in MODEL_SPECS:
+        try:
+            LOGGER.info("Loading %s model candidates: %s", model_name, ", ".join(
+                candidate["model"] for candidate in _resolve_model_candidates(model_name)
+            ) or _get_primary_model_identifier(model_name))
+            _load_pipeline(model_name)
+        except Exception as exc:
+            LOGGER.exception("Failed to load %s model", model_name)
+            model_registry[model_name] = None
+            model_tokenizers.pop(model_name, None)
+            _set_model_availability(
+                model_name,
+                None,
+                str(exc),
+                attempted_models=[candidate["model"] for candidate in _resolve_model_candidates(model_name)],
+            )
 
-        print("Loading Toxicity Model (toxic-bert)...")
-        toxicity_classifier = pipeline(
-            "text-classification",
-            model="unitary/toxic-bert",
-            top_k=None, device=-1
-        )
+    sentiment_classifier = model_registry.get("sentiment")
+    toxicity_classifier = model_registry.get("toxicity")
+    type_classifier = model_registry.get("type")
+    emotion_classifier = model_registry.get("emotion")
+    sarcasm_classifier = model_registry.get("sarcasm")
 
-        print("Loading Zero-Shot Type Classifier (bart-large-mnli)...")
-        type_classifier = pipeline(
-            "zero-shot-classification",
-            model="facebook/bart-large-mnli",
-            device=-1
-        )
-
-        print("Loading Emotion Model (go_emotions)...")
-        emotion_classifier = pipeline(
-            "text-classification",
-            model="SamLowe/roberta-base-go_emotions",
-            top_k=5,  # Get top 5 emotions
-            device=-1
-        )
-
-        print("Loading Sarcasm/Irony Model (twitter-roberta-irony)...")
-        sarcasm_classifier = pipeline(
-            "text-classification",
-            model="cardiffnlp/twitter-roberta-base-irony",
-            device=-1
-        )
-
-        print("All models loaded successfully!")
-    except Exception as e:
-        print(f"Critical error loading models: {e}")
+    missing_required = [
+        name for name, status in model_status.items()
+        if status["required"] and not status["loaded"]
+    ]
+    if missing_required:
+        LOGGER.error("Required models unavailable: %s", ", ".join(missing_required))
+    else:
+        LOGGER.info("Required models loaded successfully")
 
 # ──────────────────────────────────────
 # Heuristic Boosters for Comment Type
@@ -441,6 +670,7 @@ def apply_type_heuristics(text: str, type_scores: dict, sentiment: str,
     """
     lower = text.lower().strip()
     boosted = dict(type_scores)
+    heuristic_flags = []
 
     # ── Emotion-based boosting ──
     if emotions:
@@ -450,6 +680,7 @@ def apply_type_heuristics(text: str, type_scores: dict, sentiment: str,
             if label in EMOTION_TYPE_BOOST and score > 0.3:
                 target_type, boost_val = EMOTION_TYPE_BOOST[label]
                 boosted[target_type] = boosted.get(target_type, 0) + boost_val * score
+                heuristic_flags.append(f"emotion:{label}->{target_type}")
 
     # ── Question detection ──
     question_patterns = [
@@ -461,40 +692,49 @@ def apply_type_heuristics(text: str, type_scores: dict, sentiment: str,
     question_signal = sum(1 for p in question_patterns if re.search(p, lower))
     if question_signal >= 1:
         boosted["Question"] = boosted.get("Question", 0) + 0.25 * question_signal
+        heuristic_flags.append("question_pattern")
 
     # ── Uncertainty / ambivalence ──
     uncertainty_patterns = r'\b(idk|i do not know|not sure|unsure|uncertain|maybe|might|on the fence|hard to say|can\'t decide|cannot decide|i guess|idk if|not sure if|don\'t know if|do not know if)\b'
     if re.search(uncertainty_patterns, lower):
         boosted["Other"] = boosted.get("Other", 0) + 0.15
         boosted["Complaint"] = boosted.get("Complaint", 0) * 0.5
+        heuristic_flags.append("uncertainty_language")
 
     # ── Complaint signals ──
     complaint_words = r'\b(terrible|horrible|awful|worst|hate|sucks|broken|unusable|unacceptable|ridiculous|disgusting|pathetic|waste|scam|fraud|rip.?off|garbage|trash|useless|disappointed|frustrating|infuriating)\b'
     if re.search(complaint_words, lower):
         boosted["Complaint"] = boosted.get("Complaint", 0) + 0.2
+        heuristic_flags.append("complaint_keywords")
     if sentiment == "Negative" and tox_score > 0.3:
         boosted["Complaint"] = boosted.get("Complaint", 0) + 0.15
+        heuristic_flags.append("negative_toxicity_boost")
 
     superlative_complaint = r'\b(stupidest|dumbest|worst|most annoying|most useless|most pathetic|most ridiculous)\b.*\b(ever|in my life|of all time|i have ever|i\'ve ever)\b'
     if re.search(superlative_complaint, lower):
         boosted["Complaint"] = boosted.get("Complaint", 0) + 0.4
+        heuristic_flags.append("superlative_complaint")
 
     # ── Praise signals ──
     praise_words = r'\b(amazing|awesome|excellent|fantastic|wonderful|brilliant|outstanding|perfect|incredible|love|loved|loving|best|great|superb|magnificent|phenomenal|thank|thanks|grateful|impressed)\b'
     if re.search(praise_words, lower):
         boosted["Praise"] = boosted.get("Praise", 0) + 0.2
+        heuristic_flags.append("praise_keywords")
     if sentiment == "Positive":
         boosted["Praise"] = boosted.get("Praise", 0) + 0.1
+        heuristic_flags.append("positive_sentiment_boost")
 
     slang_praise_words = r'\b(fire|goat|lit|sick|bussin|bussing|slaps|slap|dope|heat|chef\'s kiss|elite|insane|valid|hard|goes hard|hits different|peak|god.?tier|next level|top.?tier|no cap|on point|clean|mint|ace|bangin|banging|killer|banger)\b'
     if re.search(slang_praise_words, lower):
         boosted["Praise"] = boosted.get("Praise", 0) + 0.35
         boosted["Complaint"] = boosted.get("Complaint", 0) * 0.4
+        heuristic_flags.append("slang_praise")
 
     # ── Feedback signals ──
     feedback_words = r'\b(should|could|would be better|suggest|suggestion|recommend|consider|improve|improvement|perhaps|it would be nice|feature request|adding|please add|wish|hope)\b'
     if re.search(feedback_words, lower):
         boosted["Feedback"] = boosted.get("Feedback", 0) + 0.2
+        heuristic_flags.append("feedback_keywords")
 
     # ── Spam signals (multiplicative) ──
     spam_multiplier = 1.0
@@ -503,21 +743,26 @@ def apply_type_heuristics(text: str, type_scores: dict, sentiment: str,
     spam_keyword_matches = len(re.findall(spam_keywords, lower))
     if spam_keyword_matches >= 1:
         spam_multiplier *= (1.0 + 0.4 * spam_keyword_matches)
+        heuristic_flags.append("spam_keywords")
 
     if re.search(r'(www\.|\.com|\.net|\.org|\.io|https?://)', lower):
         spam_multiplier *= 1.8
+        heuristic_flags.append("spam_url")
 
     exclamation_count = len(re.findall(r'!', text))
     if exclamation_count >= 2:
         spam_multiplier *= (1.0 + 0.2 * min(exclamation_count, 5))
+        heuristic_flags.append("spam_exclamations")
 
     caps_words = re.findall(r'\b[A-Z]{3,}\b', text)
     if len(caps_words) >= 1:
         spam_multiplier *= (1.0 + 0.3 * min(len(caps_words), 5))
+        heuristic_flags.append("spam_caps")
 
     imperative_cmds = r'(?:^|[.!?]\s*)(buy|shop|click|visit|follow|subscribe|join|sign up|check out|order|call|get your|grab|hurry|act now|don\'t miss)\b'
     if re.search(imperative_cmds, lower):
         spam_multiplier *= 1.5
+        heuristic_flags.append("spam_imperative")
 
     if spam_multiplier > 1.0:
         base_spam = max(boosted.get("Spam", 0), 0.08)
@@ -530,7 +775,7 @@ def apply_type_heuristics(text: str, type_scores: dict, sentiment: str,
     if total > 0:
         boosted = {k: round(v / total, 4) for k, v in boosted.items()}
 
-    return boosted
+    return boosted, heuristic_flags
 
 # ──────────────────────────────────────
 # Confidence Thresholding
@@ -565,24 +810,9 @@ def classify_multi_sentence(text: str, cleaned: str) -> dict:
 
     for sent_text in sentences:
         try:
-            result = sentiment_classifier(sent_text[:512])
-            scores = {}
-            for item in result[0] if isinstance(result[0], list) else result:
-                label = item["label"].lower()
-                if "positive" in label:
-                    mapped = "Positive"
-                elif "negative" in label:
-                    mapped = "Negative"
-                else:
-                    mapped = "Neutral"
-                scores[mapped] = scores.get(mapped, 0) + item["score"]
-
-            total = sum(scores.values())
-            if total > 0:
-                scores = {k: round(v / total, 4) for k, v in scores.items()}
-            for k in ["Positive", "Neutral", "Negative"]:
-                if k not in scores:
-                    scores[k] = 0.0
+            sentence_input, _ = truncate_for_model(sent_text, "sentiment")
+            result = sentiment_classifier(sentence_input)
+            scores = _normalize_sentiment_output(result)
 
             predicted = max(scores, key=scores.get)
             per_sentence.append({
@@ -613,223 +843,270 @@ def classify_multi_sentence(text: str, cleaned: str) -> dict:
         "is_mixed": len(set(s["sentiment"] for s in per_sentence)) > 1
     }
 
-# ──────────────────────────────────────
-# Helper: classify single text
-# ──────────────────────────────────────
-def classify_text_internal(text: str) -> dict:
-    if sentiment_classifier is None or toxicity_classifier is None or type_classifier is None:
-        raise HTTPException(status_code=503, detail="Models not fully loaded. Please try again later.")
+def analyze_word_sentiment(text: str) -> tuple[list, dict]:
+    tokens = re.findall(r'\S+|\s+', text)
+    word_analysis = []
+    word_counts = {"total": 0, "positive": 0, "neutral": 0, "negative": 0}
+    word_positions = []
+    word_to_position = {}
 
-    start = time.time()
-
-    # Check for gibberish
-    gibberish = is_gibberish(text)
-
-    # Check language
-    is_english = detect_language_is_english(text)
-
-    # Preprocess
-    cleaned = preprocess_text(text)
-    truncated = cleaned[:2000]
-
-    # 1. Sentiment
-    sent_results = sentiment_classifier(truncated)
-    sent_scores = {}
-    for item in sent_results[0] if isinstance(sent_results[0], list) else sent_results:
-        label = item["label"].lower()
-        if "positive" in label:
-            mapped = "Positive"
-        elif "negative" in label:
-            mapped = "Negative"
+    for token in tokens:
+        if token.strip():
+            position = len(word_positions)
+            word_positions.append(token)
+            word_to_position.setdefault(token, []).append(position)
+            word_counts["total"] += 1
         else:
-            mapped = "Neutral"
-        sent_scores[mapped] = sent_scores.get(mapped, 0) + item["score"]
+            word_analysis.append({"text": token, "sentiment": "Whitespace"})
 
-    total = sum(sent_scores.values())
-    if total > 0:
-        sent_scores = {k: round(v / total, 4) for k, v in sent_scores.items()}
-    for k in ["Positive", "Neutral", "Negative"]:
-        if k not in sent_scores:
-            sent_scores[k] = 0.0
-    predicted_sentiment = max(sent_scores, key=sent_scores.get)
+    seen_counts = Counter()
+    rebuilt_analysis = []
+    for token in tokens:
+        if not token.strip():
+            rebuilt_analysis.append({"text": token, "sentiment": "Whitespace"})
+            continue
 
-    # 2. Sarcasm/Irony Detection
-    is_sarcastic = False
-    sarcasm_score = 0.0
-    if sarcasm_classifier:
-        try:
-            sarc_result = sarcasm_classifier(truncated[:512])
-            for item in sarc_result if isinstance(sarc_result, list) else [sarc_result]:
-                if isinstance(item, list):
-                    item = item[0]
-                if item["label"].lower() in ("irony", "label_1", "1"):
-                    sarcasm_score = item["score"]
-        except Exception:
-            pass
+        occurrence = seen_counts[token]
+        positions = word_to_position.get(token, [])
+        word_idx = positions[occurrence] if occurrence < len(positions) else len(word_positions) - 1
+        seen_counts[token] += 1
 
-    # Sarcasm requires both: high model score AND negative contextual cues
-    # (prevents false positives on genuinely enthusiastic text)
-    lower_text = text.lower()
+        context_start = max(0, word_idx - 2)
+        context_words = word_positions[context_start:word_idx + 1]
+        context_phrase = ' '.join(context_words)
+        if len(context_words) > 1:
+            phrase_score = vader_analyzer.polarity_scores(context_phrase)['compound']
+            single_score = vader_analyzer.polarity_scores(token)['compound']
+            if (phrase_score > 0 > single_score) or (phrase_score < 0 < single_score):
+                score = phrase_score
+            else:
+                score = single_score
+        else:
+            score = vader_analyzer.polarity_scores(token)['compound']
+
+        if score >= 0.05:
+            sent = "Positive"
+        elif score <= -0.05:
+            sent = "Negative"
+        else:
+            sent = "Neutral"
+        rebuilt_analysis.append({"text": token, "sentiment": sent})
+        word_counts[sent.lower()] += 1
+
+    return rebuilt_analysis, word_counts
+
+def _ensure_core_models():
+    missing = [name for name in ("sentiment", "toxicity", "type") if model_registry.get(name) is None]
+    if missing:
+        raise HTTPException(
+            status_code=503,
+            detail=f"Required models not loaded: {', '.join(missing)}. Please try again later.",
+        )
+
+def _build_text_record(text: str) -> dict:
+    cleaned = preprocess_text(text)
+    record = {
+        "text": text,
+        "cleaned": cleaned,
+        "gibberish": is_gibberish(text),
+        "is_english": detect_language_is_english(text),
+        "truncation": {},
+        "stage_timings_ms": {},
+        "heuristics_applied": [],
+    }
+    for model_name in MODEL_SPECS:
+        prepared, meta = truncate_for_model(cleaned, model_name)
+        record[f"{model_name}_input"] = prepared
+        record["truncation"][model_name] = meta
+    return record
+
+def _apply_sarcasm_adjustment(record: dict, predicted_sentiment: str, sent_scores: dict, sarcasm_score: float) -> tuple[str, dict, bool]:
+    lower_text = record["text"].lower()
     has_negative_cues = bool(re.search(
         r'\b(crash|broke|broken|fail|problem|issue|wrong|bad|worst|terrible|horrible|sucks|hate)\b'
         r'|(\d+\s*times)',
         lower_text
     ))
-    # Gratitude phrases suppress sarcasm detection
     has_gratitude = bool(re.search(
         r'\b(thanks?|thx|ty|tysm|thank you|grateful|appreciate|thats? great|good job|nice work|well done|awesome work)\b',
         lower_text
     ))
     if has_gratitude:
         has_negative_cues = False
+        record["heuristics_applied"].append("sarcasm_gratitude_suppression")
 
-    # Only flag sarcasm if model is very confident AND text has negative context
-    if sarcasm_score > 0.80 and has_negative_cues:
-        is_sarcastic = True
+    is_sarcastic = sarcasm_score > 0.80 and has_negative_cues
+    if is_sarcastic:
+        record["heuristics_applied"].append("sarcasm_negative_context")
 
-    # If sarcastic and model says positive, it's likely actually negative
     if is_sarcastic and predicted_sentiment == "Positive":
+        record["heuristics_applied"].append("sarcasm_flip_positive_to_negative")
         predicted_sentiment = "Negative"
         old_pos = sent_scores.get("Positive", 0)
         old_neg = sent_scores.get("Negative", 0)
         sent_scores["Positive"] = round(old_neg * 0.5, 4)
         sent_scores["Negative"] = round(old_pos * 0.8, 4)
-        sent_scores["Neutral"] = round(1.0 - sent_scores["Positive"] - sent_scores["Negative"], 4)
+        sent_scores["Neutral"] = round(max(0.0, 1.0 - sent_scores["Positive"] - sent_scores["Negative"]), 4)
+    return predicted_sentiment, sent_scores, is_sarcastic
 
-    # 3. Toxicity
-    tox_results = toxicity_classifier(truncated)
-    tox_score = 0.0
-    for item in tox_results[0] if isinstance(tox_results[0], list) else tox_results:
-        if item["label"].lower() == "toxic":
-            tox_score = item["score"]
-    is_toxic = tox_score > 0.5
+def classify_texts_internal(texts: list[str]) -> list[dict]:
+    _ensure_core_models()
+    started = time.perf_counter()
+    records = [_build_text_record(str(text)) for text in texts]
 
-    # 4. Emotion Detection
-    emotions = []
-    if emotion_classifier:
-        try:
-            emo_results = emotion_classifier(truncated[:512])
-            if isinstance(emo_results, list) and len(emo_results) > 0:
-                if isinstance(emo_results[0], list):
-                    emotions = emo_results[0]
-                else:
-                    emotions = emo_results
-        except Exception:
-            pass
-
-    # 5. Comment Type (zero-shot + heuristics + emotion boosting)
-    type_results = type_classifier(truncated, candidate_labels=CANDIDATE_TYPES)
-    raw_type_scores = {}
-    for label, score in zip(type_results["labels"], type_results["scores"]):
-        clean_label = TYPE_LABEL_MAP.get(label, label)
-        raw_type_scores[clean_label] = round(score, 4)
-
-    type_scores = apply_type_heuristics(
-        text, raw_type_scores, predicted_sentiment, tox_score, emotions
+    sentiment_results, sentiment_ms = _run_stage_batch(
+        "sentiment",
+        [record["sentiment_input"] for record in records],
     )
+    for record, result in zip(records, sentiment_results):
+        record["stage_timings_ms"]["sentiment"] = sentiment_ms
+        record["sent_scores"] = _normalize_sentiment_output(result)
+        record["predicted_sentiment"] = max(record["sent_scores"], key=record["sent_scores"].get)
 
-    # If sarcasm detected and sentiment was flipped to Negative, boost Complaint over Praise
-    if is_sarcastic and predicted_sentiment == "Negative":
-        praise_val = type_scores.get("Praise", 0)
-        type_scores["Complaint"] = type_scores.get("Complaint", 0) + praise_val * 0.6
-        type_scores["Praise"] = praise_val * 0.3
-        # Re-normalize
-        total_t = sum(type_scores.values())
-        if total_t > 0:
-            type_scores = {k: round(v / total_t, 4) for k, v in type_scores.items()}
+    sarcasm_results, sarcasm_ms = _run_stage_batch(
+        "sarcasm",
+        [record["sarcasm_input"] for record in records],
+    )
+    for record, result in zip(records, sarcasm_results):
+        record["stage_timings_ms"]["sarcasm"] = sarcasm_ms
+        sarcasm_score = 0.0 if result is None else _extract_label_score(result, {"irony", "label_1", "1"})
+        record["sarcasm_score"] = sarcasm_score
+        adjusted_sentiment, adjusted_scores, is_sarcastic = _apply_sarcasm_adjustment(
+            record, record["predicted_sentiment"], dict(record["sent_scores"]), sarcasm_score
+        )
+        record["predicted_sentiment"] = adjusted_sentiment
+        record["sent_scores"] = adjusted_scores
+        record["is_sarcastic"] = is_sarcastic
 
-    predicted_type = max(type_scores, key=type_scores.get)
+    toxicity_results, toxicity_ms = _run_stage_batch(
+        "toxicity",
+        [record["toxicity_input"] for record in records],
+    )
+    for record, result in zip(records, toxicity_results):
+        record["stage_timings_ms"]["toxicity"] = toxicity_ms
+        tox_score = 0.0 if result is None else _extract_label_score(result, {"toxic"})
+        record["toxicity"] = tox_score
+        record["is_toxic"] = tox_score > 0.5
 
-    # 6. Confidence thresholding
-    predicted_sentiment, is_uncertain = apply_confidence_flag(predicted_sentiment, sent_scores)
-
-    # 7. Multi-sentence analysis (only for 2+ sentence text)
-    multi_sentence = classify_multi_sentence(text, cleaned)
-    if multi_sentence and multi_sentence["is_mixed"]:
-        # Use aggregated scores for mixed-sentiment text
-        sent_scores = multi_sentence["aggregated_scores"]
-        predicted_sentiment = multi_sentence["aggregated_sentiment"]
-        predicted_sentiment, is_uncertain = apply_confidence_flag(predicted_sentiment, sent_scores)
-
-    # Override for gibberish
-    if gibberish:
-        predicted_sentiment = "Neutral"
-        sent_scores = {"Positive": 0.0, "Neutral": 1.0, "Negative": 0.0}
-        predicted_type = "Spam"
-        type_scores = {k: (1.0 if k == "Spam" else 0.0) for k in type_scores}
-        is_uncertain = False
-        emotions = []
-        is_sarcastic = False
-
-    latency_ms = round((time.time() - start) * 1000)
-
-    # 8. Word-Level Lexicon Sentiments (VADER on original text)
-    tokens = re.findall(r'\S+|\s+', text)
-    word_analysis = []
-    word_counts = {"total": 0, "positive": 0, "neutral": 0, "negative": 0}
-
-    words_only = [t for t in tokens if t.strip()]
-    for i, token in enumerate(tokens):
-        if token.strip():
-            word_idx = words_only.index(token) if token in words_only else -1
-            if word_idx >= 0:
-                context_start = max(0, word_idx - 2)
-                context_words = words_only[context_start:word_idx + 1]
-                context_phrase = ' '.join(context_words)
-                if len(context_words) > 1:
-                    phrase_score = vader_analyzer.polarity_scores(context_phrase)['compound']
-                    single_score = vader_analyzer.polarity_scores(token)['compound']
-                    if (phrase_score > 0 and single_score < 0) or (phrase_score < 0 and single_score > 0):
-                        score = phrase_score
-                    else:
-                        score = single_score
-                else:
-                    score = vader_analyzer.polarity_scores(token)['compound']
-            else:
-                score = vader_analyzer.polarity_scores(token)['compound']
-
-            if score >= 0.05:
-                sent = "Positive"
-            elif score <= -0.05:
-                sent = "Negative"
-            else:
-                sent = "Neutral"
-            word_analysis.append({"text": token, "sentiment": sent})
-            word_counts["total"] += 1
-            word_counts[sent.lower()] += 1
+    emotion_results, emotion_ms = _run_stage_batch(
+        "emotion",
+        [record["emotion_input"] for record in records],
+    )
+    for record, result in zip(records, emotion_results):
+        record["stage_timings_ms"]["emotion"] = emotion_ms
+        if result is None:
+            record["emotions"] = []
+        elif isinstance(result, list) and result and isinstance(result[0], dict):
+            record["emotions"] = result
+        elif isinstance(result, list) and result:
+            record["emotions"] = result[0]
         else:
-            word_analysis.append({"text": token, "sentiment": "Whitespace"})
+            record["emotions"] = []
 
-    # Build response
-    response = {
-        "sentiment": predicted_sentiment,
-        "sentiment_confidence": {
-            "positive": sent_scores.get("Positive", 0),
-            "neutral": sent_scores.get("Neutral", 0),
-            "negative": sent_scores.get("Negative", 0),
-        },
-        "is_uncertain": is_uncertain,
-        "toxicity": round(tox_score, 4),
-        "is_toxic": is_toxic,
-        "comment_type": predicted_type,
-        "type_scores": type_scores,
-        "is_sarcastic": is_sarcastic,
-        "sarcasm_score": round(sarcasm_score, 4),
-        "emotions": [{"label": e["label"], "score": round(e["score"], 4)} for e in emotions[:5]] if emotions else [],
-        "is_english": is_english,
-        "word_analysis": word_analysis,
-        "word_counts": word_counts,
-        "latency_ms": latency_ms,
-    }
+    type_results, type_ms = _run_stage_batch(
+        "type",
+        [record["type_input"] for record in records],
+        candidate_labels=CANDIDATE_TYPES,
+    )
+    for record, result in zip(records, type_results):
+        record["stage_timings_ms"]["type"] = type_ms
+        raw_type_scores = {}
+        for label, score in zip(result["labels"], result["scores"]):
+            clean_label = TYPE_LABEL_MAP.get(label, label)
+            raw_type_scores[clean_label] = round(score, 4)
 
-    # Include per-sentence breakdown if multi-sentence
-    if multi_sentence:
-        response["multi_sentence"] = {
-            "sentences": multi_sentence["sentences"],
-            "is_mixed": multi_sentence["is_mixed"],
+        type_scores, heuristic_flags = apply_type_heuristics(
+            record["text"],
+            raw_type_scores,
+            record["predicted_sentiment"],
+            record["toxicity"],
+            record["emotions"],
+        )
+        record["heuristics_applied"].extend(heuristic_flags)
+
+        if record["is_sarcastic"] and record["predicted_sentiment"] == "Negative":
+            praise_val = type_scores.get("Praise", 0)
+            type_scores["Complaint"] = type_scores.get("Complaint", 0) + praise_val * 0.6
+            type_scores["Praise"] = praise_val * 0.3
+            total_t = sum(type_scores.values())
+            if total_t > 0:
+                type_scores = {k: round(v / total_t, 4) for k, v in type_scores.items()}
+            record["heuristics_applied"].append("sarcasm_type_redirect")
+
+        record["type_scores"] = type_scores
+        record["predicted_type"] = max(type_scores, key=type_scores.get)
+        record["predicted_sentiment"], record["is_uncertain"] = apply_confidence_flag(
+            record["predicted_sentiment"], record["sent_scores"]
+        )
+
+    responses = []
+    total_latency_ms = round((time.perf_counter() - started) * 1000)
+    per_item_latency_ms = round(total_latency_ms / max(1, len(records)))
+
+    for record in records:
+        multi_sentence = classify_multi_sentence(record["text"], record["cleaned"])
+        if multi_sentence and multi_sentence["is_mixed"]:
+            record["sent_scores"] = multi_sentence["aggregated_scores"]
+            record["predicted_sentiment"] = multi_sentence["aggregated_sentiment"]
+            record["predicted_sentiment"], record["is_uncertain"] = apply_confidence_flag(
+                record["predicted_sentiment"], record["sent_scores"]
+            )
+            record["heuristics_applied"].append("mixed_sentiment_aggregation")
+
+        if record["gibberish"]:
+            record["predicted_sentiment"] = "Neutral"
+            record["sent_scores"] = {"Positive": 0.0, "Neutral": 1.0, "Negative": 0.0}
+            record["predicted_type"] = "Spam"
+            record["type_scores"] = {label: (1.0 if label == "Spam" else 0.0) for label in TYPE_LABEL_MAP.values()}
+            record["is_uncertain"] = False
+            record["emotions"] = []
+            record["is_sarcastic"] = False
+            record["sarcasm_score"] = 0.0
+            record["heuristics_applied"].append("gibberish_short_circuit")
+
+        word_analysis, word_counts = analyze_word_sentiment(record["text"])
+        response = {
+            "sentiment": record["predicted_sentiment"],
+            "sentiment_confidence": {
+                "positive": record["sent_scores"].get("Positive", 0),
+                "neutral": record["sent_scores"].get("Neutral", 0),
+                "negative": record["sent_scores"].get("Negative", 0),
+            },
+            "is_uncertain": record["is_uncertain"],
+            "toxicity": round(record.get("toxicity", 0.0), 4),
+            "is_toxic": record.get("is_toxic", False),
+            "comment_type": record["predicted_type"],
+            "type_scores": record["type_scores"],
+            "is_sarcastic": record.get("is_sarcastic", False),
+            "sarcasm_score": round(record.get("sarcasm_score", 0.0), 4),
+            "emotions": [
+                {"label": e["label"], "score": round(e["score"], 4)}
+                for e in record.get("emotions", [])[:5]
+            ],
+            "is_english": record["is_english"],
+            "word_analysis": word_analysis,
+            "word_counts": word_counts,
+            "latency_ms": per_item_latency_ms,
+            "stage_timings_ms": record["stage_timings_ms"],
+            "truncation": record["truncation"],
+            "heuristics_applied": sorted(set(record["heuristics_applied"])),
+            "model_versions": {
+                name: model_status.get(name, {}).get("model")
+                for name in MODEL_SPECS
+                if model_status.get(name, {}).get("loaded")
+            },
         }
+        if multi_sentence:
+            response["multi_sentence"] = {
+                "sentences": multi_sentence["sentences"],
+                "is_mixed": multi_sentence["is_mixed"],
+            }
+        responses.append(response)
 
-    return response
+    return responses
+
+def classify_text_internal(text: str) -> dict:
+    return classify_texts_internal([text])[0]
 
 # ──────────────────────────────────────
 # Job Store (in-memory)
@@ -845,9 +1122,16 @@ def process_batch_job(job_id: str, texts: list):
     batch_size = 16
     for i in range(0, len(texts), batch_size):
         batch = texts[i:i + batch_size]
-        for text in batch:
+        try:
+            batch_results = classify_texts_internal([str(text) for text in batch])
+        except Exception:
+            LOGGER.exception("Batch inference failed for rows %s-%s", i, i + len(batch) - 1)
+            batch_results = [None] * len(batch)
+
+        for text, result in zip(batch, batch_results):
             try:
-                result = classify_text_internal(str(text))
+                if result is None:
+                    raise RuntimeError("No result returned from batch inference")
                 results.append({
                     "comment": str(text),
                     "sentiment": result["sentiment"],
@@ -861,10 +1145,13 @@ def process_batch_job(job_id: str, texts: list):
                     "is_uncertain": result.get("is_uncertain", False),
                     "emotions": result.get("emotions", []),
                     "word_analysis": result.get("word_analysis", []),
-                    "word_counts": result.get("word_counts", {})
+                    "word_counts": result.get("word_counts", {}),
+                    "stage_timings_ms": result.get("stage_timings_ms", {}),
+                    "heuristics_applied": result.get("heuristics_applied", []),
+                    "truncation": result.get("truncation", {}),
                 })
             except Exception as e:
-                print(f"Error on batch item: {e}")
+                LOGGER.exception("Error on batch item")
                 results.append({
                     "comment": str(text),
                     "sentiment": "Error",
@@ -872,7 +1159,10 @@ def process_batch_job(job_id: str, texts: list):
                     "toxicity": 0, "is_toxic": False, "comment_type": "Unknown",
                     "is_sarcastic": False, "is_uncertain": False,
                     "emotions": [],
-                    "word_analysis": [], "word_counts": {}
+                    "word_analysis": [], "word_counts": {},
+                    "stage_timings_ms": {},
+                    "heuristics_applied": [f"batch_error:{type(e).__name__}"],
+                    "truncation": {},
                 })
             job["processed"] = len(results)
 
@@ -885,14 +1175,29 @@ def process_batch_job(job_id: str, texts: list):
 
 @app.get("/health")
 async def health():
+    required_ready = all(
+        model_status.get(name, {}).get("loaded")
+        for name, spec in MODEL_SPECS.items()
+        if spec["required"]
+    )
+    optional_ready = all(
+        model_status.get(name, {}).get("loaded")
+        for name, spec in MODEL_SPECS.items()
+        if not spec["required"]
+    )
+
     return {
-        "status": "ok" if (sentiment_classifier and toxicity_classifier and type_classifier) else "model_not_loaded",
+        "status": "ok" if (required_ready and optional_ready) else ("degraded" if required_ready else "model_not_loaded"),
         "sentiment_loaded": sentiment_classifier is not None,
         "toxicity_loaded": toxicity_classifier is not None,
         "type_loaded": type_classifier is not None,
         "emotion_loaded": emotion_classifier is not None,
         "sarcasm_loaded": sarcasm_classifier is not None,
-        "version": "3.0"
+        "preferred_sentiment_model": _get_configured_modernbert_model() or None,
+        "active_sentiment_model": model_status.get("sentiment", {}).get("model"),
+        "active_sentiment_display_name": model_status.get("sentiment", {}).get("display_name"),
+        "model_status": model_status,
+        "version": APP_VERSION
     }
 
 @app.post("/classify/text")

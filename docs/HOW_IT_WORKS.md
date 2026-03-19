@@ -47,6 +47,8 @@ User Input
 API Response → Frontend renders results
 ```
 
+As of March 19, 2026, this document reflects the current runtime pipeline rather than the older ModernBERT-first project pitch.
+
 ---
 
 ## Stage 1 — Text Preprocessing
@@ -90,6 +92,8 @@ When gibberish is detected: sentiment → Neutral (100%), type → Spam, all oth
 ## Stage 3 — Language Detection
 
 A lightweight word-overlap check against a set of ~100 common English words. If fewer than 15% of alphabetic words match, the comment is flagged as non-English with a blue badge. The pipeline still runs — the models handle many languages reasonably — but the flag alerts users that results may be less reliable.
+
+This is a heuristic signal, not a dedicated language-ID model, so it should be treated as a reliability hint rather than a hard block.
 
 ---
 
@@ -224,23 +228,34 @@ Overall:    Mixed → averaged → Uncertain
 
 ## Why These Models Were Chosen
 
-The original version used ModernBERT-base for sentiment and a lighter zero-shot model for types. Problems:
-- ModernBERT was not trained on informal/social text → poor slang handling
-- The lighter NLI model was less accurate on the 6-type classification task
-- No sarcasm, emotion, or multi-sentence handling at all
+The repo idea originally centered on ModernBERT, but the shipped backend evolved into an ensemble because the product now does more than plain 3-way sentiment:
 
-Replacements:
-- `twitter-roberta` for sentiment → trained on 124M tweets, informal text native
-- `bart-large-mnli` for types → stronger NLI backbone, better zero-shot generalization
-- Added `go_emotions` → richer signal for type classification and user-facing insight
-- Added `twitter-roberta-irony` → catches the most common source of false-positive sentiment
+- `twitter-roberta` for sentiment because it handles slang-heavy, social-style text better than a generic encoder baseline
+- `twitter-roberta-irony` because sarcasm is a major source of false-positive positivity
+- `toxic-bert` because toxicity and sentiment are related but not interchangeable
+- `go_emotions` because emotion signals make the type classifier more useful and more explainable
+- `bart-large-mnli` because zero-shot type classification supports Praise / Complaint / Question / Feedback / Spam / Other without maintaining a separate fine-tuned type model
+- VADER because the UI wants word-level highlights and that is a lexical feature, not a document-classifier feature
+
+ModernBERT was a reasonable starting point for a focused classifier, but this codebase no longer behaves like a single-model ModernBERT app.
+
+The backend now supports a **preferred ModernBERT sentiment backend** through `MODERNBERT_SENTIMENT_MODEL`, but that only becomes active when you provide a valid fine-tuned sequence-classification checkpoint. Without that checkpoint, the system falls back to Twitter RoBERTa for sentiment.
 
 ---
 
-## Accuracy Progression
+## Hardening Changes In v3.1
 
-| Version | What changed | Sentiment | Type | Combined |
-|---|---|---|---|---|
-| v1.0 | ModernBERT + basic NLI | ~70% | ~60% | ~65% |
-| v2.0 | twitter-roberta + bart-large + heuristics | 76% | 80% | 78% |
-| v3.0 | + emotions + sarcasm + spell correction + gibberish detection | 84% | 92% | **88%** |
+- Tokenizer-aware truncation for each model instead of character slicing
+- Explicit model registry and degraded health reporting when optional models are unavailable
+- Batched model inference for file jobs
+- Per-stage timing and truncation metadata in responses
+- Regression tests for preprocessing, sarcasm, truncation, batching, and health reporting
+- A correctness fix for repeated words in the VADER word-highlighting path
+
+---
+
+## Evaluation Status
+
+Earlier accuracy claims in project docs were not backed by a checked-in evaluation harness, so they should not be treated as current benchmark numbers.
+
+The project now includes a regression suite for behavior-level stability, but it still needs a labeled offline evaluation set before any future accuracy or F1 claim should be published.

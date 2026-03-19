@@ -2,11 +2,11 @@
 
 # ⚡ Smart Comment Classification
 
-### AI-powered sentiment analysis that actually slaps
+### AI-powered comment analysis with a multi-model NLP pipeline
 
 <br />
 
-[![ModernBERT](https://img.shields.io/badge/ModernBERT-State_of_the_Art-blueviolet?style=for-the-badge&logo=huggingface&logoColor=white)](https://huggingface.co/)
+[![Transformers](https://img.shields.io/badge/Transformers-HuggingFace-blueviolet?style=for-the-badge&logo=huggingface&logoColor=white)](https://huggingface.co/)
 [![React](https://img.shields.io/badge/React_19-61DAFB?style=for-the-badge&logo=react&logoColor=black)](https://react.dev/)
 [![FastAPI](https://img.shields.io/badge/FastAPI-009688?style=for-the-badge&logo=fastapi&logoColor=white)](https://fastapi.tiangolo.com/)
 [![Python](https://img.shields.io/badge/Python_3.11-3776AB?style=for-the-badge&logo=python&logoColor=white)](https://www.python.org/)
@@ -16,7 +16,7 @@
 
 > **Drop a comment. Get the vibe. Instantly.** ✨
 
-Classify thousands of comments into **Positive** / **Negative** / **Neutral** — powered by a fine-tuned ModernBERT transformer with >90% accuracy.
+Classify comments into **Positive** / **Negative** / **Neutral** and enrich them with **type**, **toxicity**, **emotion**, and **sarcasm** signals using a production-oriented ensemble of Hugging Face models plus lightweight heuristics.
 
 </div>
 
@@ -51,8 +51,8 @@ Classify thousands of comments into **Positive** / **Negative** / **Neutral** �
 ```mermaid
 graph LR
     A[React + Vite<br/>Frontend] -->|REST API| B[FastAPI<br/>Backend]
-    B --> C[ModernBERT<br/>Fine-tuned Model]
-    C --> D[HuggingFace<br/>🤗 Models]
+    B --> C[Sentiment + Sarcasm + Toxicity<br/>Zero-shot Type + Emotions]
+    C --> D[HuggingFace<br/>🤗 Models + Heuristics]
     
     style A fill:#61DAFB,stroke:#333,color:#000
     style B fill:#009688,stroke:#333,color:#fff
@@ -68,7 +68,7 @@ graph LR
 |:---:|:---|
 | 🖥️ Frontend | React 19 · Vite 8 · Axios · Recharts · Framer Motion |
 | ⚙️ Backend | FastAPI · Python 3.11 · Uvicorn |
-| 🧠 ML/AI | ModernBERT · HuggingFace Transformers · PyTorch |
+| 🧠 ML/AI | RoBERTa · BERT · BART MNLI · GoEmotions · VADER · HuggingFace Transformers · PyTorch |
 | 📄 File Parsing | PapaParse · SheetJS · pandas |
 
 ---
@@ -84,7 +84,7 @@ graph LR
 | `cardiffnlp/twitter-roberta-base-irony` | Sarcasm | 125M |
 | VADER Lexicon | Word Sentiment | Rule-based |
 
-> 📦 First run downloads ~1.5 GB of model weights
+> 📦 First run downloads multiple model weights from Hugging Face
 
 ---
 
@@ -165,10 +165,10 @@ curl -X POST http://localhost:8000/classify/text \
 
 | Metric | Score |
 |:---|:---:|
-| 🎯 Accuracy | >90% |
-| 📊 F1 Score | >0.88 |
-| ⚡ Single Comment (GPU) | <200ms |
-| 📦 Bulk 500 rows (GPU) | <30s |
+| 🎯 Accuracy | Not yet tracked by an automated eval suite |
+| 📊 F1 Score | Not yet tracked by an automated eval suite |
+| ⚡ Single Comment | Depends on which models are loaded and hardware |
+| 📦 Bulk Processing | Batched in the backend as of v3.1 |
 
 ---
 
@@ -179,7 +179,7 @@ flowchart TD
     A[Input Text] --> B[Preprocessing]
     B --> C[Gibberish Detection]
     C --> D{Language Check}
-    D -->|Non-English| E[Reject]
+    D -->|Non-English| E[Flag Lower Confidence]
     D -->|English| F[Model Pipeline]
     
     F --> G[1️⃣ Sentiment]
@@ -215,6 +215,46 @@ flowchart TD
 > ⚠️ **Max file:** 10 MB | **Max rows:** 5,000
 
 ---
+
+## Current Architecture
+
+This project is **not** running ModernBERT in production today.
+
+The live backend in `backend/main.py` currently uses:
+
+- `cardiffnlp/twitter-roberta-base-sentiment-latest` for sentiment
+- `cardiffnlp/twitter-roberta-base-irony` for sarcasm / irony
+- `unitary/toxic-bert` for toxicity
+- `SamLowe/roberta-base-go_emotions` for emotion tags
+- `facebook/bart-large-mnli` for zero-shot comment type classification
+- VADER for word-level lexical highlighting
+
+Recent hardening work added:
+
+- Tokenizer-aware truncation instead of raw character slicing
+- Explicit model-load status and degraded health reporting
+- Real backend batching for file jobs
+- Regression tests for preprocessing, truncation, sarcasm, and batching
+- Stage-level telemetry and heuristic/truncation metadata in responses
+
+## ModernBERT Support
+
+ModernBERT is now supported as the **preferred sentiment backend** when you provide a fine-tuned checkpoint path or Hugging Face repo through the `MODERNBERT_SENTIMENT_MODEL` environment variable.
+
+Example:
+
+```bash
+set MODERNBERT_SENTIMENT_MODEL=your-org/modernbert-comment-sentiment
+```
+
+Important:
+
+- The repo still does **not** contain a fine-tuned ModernBERT sentiment model by default.
+- If `MODERNBERT_SENTIMENT_MODEL` is missing or fails to load, the backend falls back to `cardiffnlp/twitter-roberta-base-sentiment-latest`.
+- The app UI and `/health` endpoint now expose which sentiment backend is actually active.
+- A training scaffold for producing that checkpoint now lives in `backend/training/train_modernbert_sentiment.py`.
+- The training script can now pull `cardiffnlp/tweet_eval` directly from Hugging Face for a fast public-data training path.
+- Full setup instructions live in `docs/MODERNBERT_SETUP.md`.
 
 ## 📁 Project Structure
 

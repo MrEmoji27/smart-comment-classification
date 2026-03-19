@@ -23,6 +23,7 @@
 
 .progress-container {
   padding: 24px;
+  animation: fadeIn 360ms var(--transition-slow) both;
 }
 
 .progress-text {
@@ -44,8 +45,19 @@
 .progress-bar-fill {
   height: 100%;
   border-radius: var(--radius-full);
-  transition: width 0.3s ease;
+  transition: width 0.35s var(--transition-slow);
   background: var(--accent-blue);
+  position: relative;
+  overflow: hidden;
+}
+
+.progress-bar-fill::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.35), transparent);
+  transform: translateX(-130%);
+  animation: progressSweep 1.6s ease-in-out infinite;
 }
 
 .empty-results-state {
@@ -107,11 +119,12 @@
   background: rgba(255, 255, 255, 0.06);
   border-color: var(--text-muted);
   color: var(--text-primary);
+  transform: translateY(-1px);
+  box-shadow: var(--shadow-sm);
 }
 
-.example-btn:focus-visible {
-  outline: 2px solid var(--accent-blue);
-  outline-offset: 2px;
+.example-btn:active {
+  transform: scale(0.985);
 }
 
 .error-toast {
@@ -125,8 +138,27 @@
   box-shadow: var(--shadow-lg);
   font-weight: 500;
   z-index: 9999;
+  max-width: min(420px, calc(100vw - 32px));
 }
 
 .mt-4 {
   margin-top: 16px;
+}
+
+@media (max-width: 768px) {
+  .error-toast {
+    right: 12px;
+    left: 12px;
+    bottom: 12px;
+    max-width: none;
+  }
+}
+
+@keyframes progressSweep {
+  from {
+    transform: translateX(-130%);
+  }
+  to {
+    transform: translateX(130%);
+  }
 }

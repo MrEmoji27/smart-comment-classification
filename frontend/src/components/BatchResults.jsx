@@ -1,7 +1,6 @@
 import { useState, useMemo } from 'react';
 import { Download, Search, ChevronLeft, ChevronRight, TrendingUp, TrendingDown, Minus } from 'lucide-react';
 import { PieChart, Pie, Cell, ResponsiveContainer, Tooltip as RechartsTooltip } from 'recharts';
-import * as XLSX from 'xlsx';
 import './BatchResults.css';
 
 export default function BatchResults({ results, originalFile }) {
@@ -15,7 +14,8 @@ export default function BatchResults({ results, originalFile }) {
     return results.filter(row => {
       const label = row.sentiment || row.label;
       const matchLabel = filter === 'All' || label === filter;
-      const matchSearch = row.comment.toLowerCase().includes(search.toLowerCase());
+      const commentText = String(row.comment || '');
+      const matchSearch = commentText.toLowerCase().includes(search.toLowerCase());
       return matchLabel && matchSearch;
     });
   }, [results, search, filter]);
@@ -49,7 +49,32 @@ export default function BatchResults({ results, originalFile }) {
     { name: 'Negative', value: stats.raw.Negative, color: 'var(--negative)' },
   ];
 
-  const handleExport = () => {
+  const advancedStats = useMemo(() => {
+    const totals = {
+      toxic: 0,
+      uncertain: 0,
+      sarcastic: 0,
+      byType: {},
+    };
+    results.forEach((row) => {
+      if (row.is_toxic) totals.toxic++;
+      if (row.is_uncertain) totals.uncertain++;
+      if (row.is_sarcastic) totals.sarcastic++;
+      if (row.comment_type) {
+        totals.byType[row.comment_type] = (totals.byType[row.comment_type] || 0) + 1;
+      }
+    });
+    const topType = Object.entries(totals.byType).sort((a, b) => b[1] - a[1])[0];
+    return {
+      toxic: totals.toxic,
+      uncertain: totals.uncertain,
+      sarcastic: totals.sarcastic,
+      topType: topType ? topType[0] : 'N/A',
+    };
+  }, [results]);
+
+  const handleExport = async () => {
+    const XLSX = await import('xlsx');
     const ws = XLSX.utils.json_to_sheet(results.map((r, i) => {
       const isNew = r.sentiment !== undefined;
       return {
@@ -83,8 +108,9 @@ export default function BatchResults({ results, originalFile }) {
     <div className="batch-results glass-card animate-slide-in">
       <div className="batch-header">
         <div>
+          <p className="panel-eyebrow">Batch Observatory</p>
           <h2 className="panel-title">Batch Results</h2>
-          <p className="panel-desc">Classified {results.length.toLocaleString()} rows from {originalFile?.name}</p>
+          <p className="panel-desc">Classified {results.length.toLocaleString()} rows from {originalFile?.name || 'your file'}</p>
         </div>
         <button className="btn-primary export-btn" onClick={handleExport}>
           <Download size={16} /> Export CSV
@@ -119,6 +145,25 @@ export default function BatchResults({ results, originalFile }) {
           <div className="stat-item"><span className="stat-dot neutral"></span>Neutral: {stats.Neutral}%</div>
           <div className="stat-item"><span className="stat-dot negative"></span>Negative: {stats.Negative}%</div>
         </div>
+      </div>
+
+      <div className="batch-kpi-grid">
+        <article className="batch-kpi-card">
+          <p className="batch-kpi-label">Top Comment Type</p>
+          <p className="batch-kpi-value">{advancedStats.topType}</p>
+        </article>
+        <article className="batch-kpi-card">
+          <p className="batch-kpi-label">Toxic Rows</p>
+          <p className="batch-kpi-value">{advancedStats.toxic}</p>
+        </article>
+        <article className="batch-kpi-card">
+          <p className="batch-kpi-label">Low Confidence</p>
+          <p className="batch-kpi-value">{advancedStats.uncertain}</p>
+        </article>
+        <article className="batch-kpi-card">
+          <p className="batch-kpi-label">Sarcasm Flags</p>
+          <p className="batch-kpi-value">{advancedStats.sarcastic}</p>
+        </article>
       </div>
 
       <div className="table-controls">
@@ -175,11 +220,20 @@ export default function BatchResults({ results, originalFile }) {
                   <tr key={globalIdx} className="animate-fade-in" style={{ animationDelay: `${idx * 20}ms` }}>
                     <td className="col-id">{globalIdx}</td>
                     <td className="col-comment" title={row.comment}>
-                      {row.comment.length > 80 ? row.comment.substring(0, 80) + '...' : row.comment}
-                      {isNewFormat && row.is_toxic && (
-                        <span className="label-pill toxic-pill" style={{ display: 'inline-flex', marginLeft: '8px', padding: '2px 6px', fontSize: '0.7em', background: 'rgba(255,68,68,0.1)', color: '#ff4444', border: '1px solid rgba(255,68,68,0.2)' }}>
-                          Toxic
-                        </span>
+                      {String(row.comment || '').length > 80 ? `${String(row.comment || '').substring(0, 80)}...` : String(row.comment || '')}
+                      {isNewFormat && (
+                        <div className="batch-inline-flags">
+                          {row.is_toxic && (
+                            <span className="label-pill batch-toxic-pill">
+                              Toxic
+                            </span>
+                          )}
+                          {row.is_uncertain && (
+                            <span className="label-pill batch-uncertain-pill">
+                              Low confidence
+                            </span>
+                          )}
+                        </div>
                       )}
                     </td>
                     <td>
@@ -189,7 +243,7 @@ export default function BatchResults({ results, originalFile }) {
                     </td>
                     <td>
                       {isNewFormat ? (
-                         <span className="label-pill" style={{ background: 'var(--glass-bg)', color: 'var(--text-secondary)', border: '1px solid var(--border-default)' }}>
+                         <span className="label-pill batch-type-pill">
                            {row.comment_type}
                          </span>
                       ) : (
