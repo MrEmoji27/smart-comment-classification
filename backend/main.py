@@ -156,7 +156,7 @@ COMMON_TYPOS = {
     "diff": "different", "govt": "government", "info": "information",
     "pics": "pictures", "pic": "picture", "fav": "favorite",
     "fave": "favorite", "convo": "conversation", "def": "definitely",
-    "prolly": "probably", "abt": "about", "govt": "government",
+    "prolly": "probably", "abt": "about",
     "w": "with", "b": "be", "n": "and", "r": "are", "u": "you",
     "yr": "your", "k": "okay", "luv": "love", "gud": "good",
     "gr8": "great", "h8": "hate", "l8": "late", "l8r": "later",
@@ -356,6 +356,295 @@ def split_sentences(text: str) -> list:
     return [s.strip() for s in sentences if len(s.strip()) >= 3]
 
 # ──────────────────────────────────────
+# Context-Aware Input Building
+# ──────────────────────────────────────
+_CONTEXT_SEP = " [SEP] "
+
+def build_contextual_input(text: str, context: str) -> str:
+    """
+    Prepend surrounding context to text so the model sees both during inference.
+    Format: "[Context: {context}] [SEP] {text}"
+    This is a standard prompting technique for transformers — the model attends
+    across the full context+text sequence.
+    """
+    if not context:
+        return text
+    return f"[Context: {context}]{_CONTEXT_SEP}{text}"
+
+# Patterns for context signal detection
+_CONTRAST_RE = re.compile(
+    r'\b(but|however|although|though|despite|yet|still|nevertheless|nonetheless|'
+    r'that said|even so|on the other hand|while|whereas|even though|in spite of|'
+    r'having said that|at the same time|then again|all the same)\b',
+    re.IGNORECASE,
+)
+_NEGATION_RE = re.compile(
+    r"\b(not|no|never|neither|nor|cannot|can't|won't|wouldn't|shouldn't|couldn't|"
+    r"isn't|aren't|wasn't|weren't|doesn't|don't|didn't|hardly|barely|scarcely|"
+    r"nothing|nobody|nowhere|seldom|rarely)\b",
+    re.IGNORECASE,
+)
+_CONDITIONAL_RE = re.compile(
+    r'\b(if|unless|provided that|as long as|only if|in case|assuming|suppose|'
+    r'supposing|given that|on condition that)\b',
+    re.IGNORECASE,
+)
+_COMPARATIVE_RE = re.compile(
+    r'\b(better than|worse than|more than|less than|superior to|inferior to|'
+    r'compared to|compared with|relative to|not as good as|far better|much worse|'
+    r'way better|way worse)\b',
+    re.IGNORECASE,
+)
+
+def detect_context_signals(text: str) -> dict:
+    """
+    Detect linguistic patterns that affect how sentiment should be interpreted.
+    Surfaces these in the API response so consumers understand *why* a label
+    was assigned (e.g. negation flipped the polarity, contrast split the meaning).
+    """
+    return {
+        "has_negation": bool(_NEGATION_RE.search(text)),
+        "has_contrast": bool(_CONTRAST_RE.search(text)),
+        "is_conditional": bool(_CONDITIONAL_RE.search(text)),
+        "is_comparative": bool(_COMPARATIVE_RE.search(text)),
+    }
+
+# ──────────────────────────────────────
+# Sensitive Topic Detection
+# ──────────────────────────────────────
+SENSITIVE_TOPIC_PATTERNS: dict = {
+    "weapons_firearms": re.compile(
+        r'\b(gun|guns|firearm|firearms|rifle|pistol|shotgun|revolver|weapon|weapons|'
+        r'knife|knives|blade|ammo|ammunition|bullet|bullets|armed|'
+        r'second.?amendment|conceal.?carry|open.?carry|ar-?15|ak-?47)\b',
+        re.IGNORECASE,
+    ),
+    "politics": re.compile(
+        r'\b(democrat|republican|liberal|conservative|socialist|communist|fascist|'
+        r'election|vote|voting|ballot|congress|senate|parliament|president|'
+        r'prime minister|politician|government|political|policy|legislation|'
+        r'immigration|abortion|left.?wing|right.?wing|constitution|regime)\b',
+        re.IGNORECASE,
+    ),
+    "religion": re.compile(
+        r'\b(god|allah|jesus|christ|christian|muslim|jewish|hindu|buddhist|sikh|'
+        r'religion|religious|church|mosque|temple|synagogue|prayer|pray|faith|'
+        r'bible|quran|torah|atheist|agnostic|blasphemy|sacred|holy|divine)\b',
+        re.IGNORECASE,
+    ),
+    "drugs_alcohol": re.compile(
+        r'\b(drug|drugs|marijuana|weed|cannabis|cocaine|heroin|meth|methamphetamine|'
+        r'alcohol|beer|wine|liquor|drunk|substance|overdose|addiction|addicted|'
+        r'narcotic|opioid|fentanyl|crack|ecstasy|lsd|psychedelic)\b',
+        re.IGNORECASE,
+    ),
+    "violence": re.compile(
+        r'\b(kill|killing|killed|murder|murdered|fight|fighting|war|warfare|'
+        r'violent|violence|assault|abuse|harm|death|dead|dying|genocide|'
+        r'torture|bomb|terrorist|terrorism|massacre|shooting|stabbing)\b',
+        re.IGNORECASE,
+    ),
+    "mental_health": re.compile(
+        r'\b(depression|depressed|anxiety|anxious|suicide|suicidal|self.harm|'
+        r'mental.health|bipolar|schizophrenia|trauma|ptsd|panic.attack|'
+        r'eating.disorder|anorexia|bulimia)\b',
+        re.IGNORECASE,
+    ),
+    "race_discrimination": re.compile(
+        r'\b(racist|racism|racial|white.supremac|hate.crime|discrimination|'
+        r'segregation|xenophobia|islamophobia|antisemit|ethnic.cleansing|'
+        r'bigot|bigotry|slur)\b',
+        re.IGNORECASE,
+    ),
+}
+
+def detect_sensitive_topics(text: str) -> dict:
+    """
+    Detect if the comment touches on sensitive or controversial topics.
+    This does NOT change the sentiment label — it adds context so consumers
+    know to interpret a 'Positive' label as 'positive opinion about weapons'
+    rather than a neutral cheerful statement.
+    """
+    detected = [topic for topic, pattern in SENSITIVE_TOPIC_PATTERNS.items() if pattern.search(text)]
+    return {
+        "topics": detected,
+        "is_sensitive": len(detected) > 0,
+    }
+
+# ──────────────────────────────────────
+# Subjectivity, Intensity & Calibration
+# ──────────────────────────────────────
+_OPINION_MARKERS = re.compile(
+    r'\b(i think|i believe|i feel|i reckon|i guess|in my opinion|imo|imho|'
+    r'personally|from my perspective|it seems to me|as far as i can tell|'
+    r'i would say|to me it|for me it|my view|my opinion|my take|'
+    r'i consider|i find it|i find this)\b',
+    re.IGNORECASE,
+)
+_HEDGING_MARKERS = re.compile(
+    r'\b(maybe|perhaps|possibly|probably|might|could be|seems like|kind of|'
+    r'sort of|somewhat|rather|fairly|relatively|not sure if|apparently|'
+    r'supposedly|allegedly|i guess|i suppose)\b',
+    re.IGNORECASE,
+)
+_INTENSIFIER_MARKERS = re.compile(
+    r'\b(very|extremely|absolutely|completely|totally|utterly|incredibly|'
+    r'amazingly|terribly|horribly|really|so much|such a|way too|way more|'
+    r'way less|so damn|freaking|genuinely|truly|deeply|insanely|ridiculously)\b',
+    re.IGNORECASE,
+)
+_FACTUAL_MARKERS = re.compile(
+    r'\b(according to|research shows|studies show|data shows|it is a fact|'
+    r'scientifically|statistically|proven|evidence suggests|report says|'
+    r'survey found|analysis shows|statistics show|experts say|facts show)\b',
+    re.IGNORECASE,
+)
+_RHETORICAL_Q_RE = re.compile(
+    r'\b(seriously\?|really\?|are you kidding|is this a joke|how is that|'
+    r'why would|why on earth|what were they thinking|who does that|'
+    r'can you believe|how could|is it really|do they really)\b',
+    re.IGNORECASE,
+)
+
+def compute_subjectivity(text: str) -> dict:
+    """
+    Score how subjective vs objective the text is using linguistic markers.
+    Returns a label (subjective / objective / mixed), a 0-1 score, and the
+    detected markers so the frontend can explain the classification.
+    """
+    has_opinion = bool(_OPINION_MARKERS.search(text))
+    has_hedging = bool(_HEDGING_MARKERS.search(text))
+    has_intensifier = bool(_INTENSIFIER_MARKERS.search(text))
+    has_factual = bool(_FACTUAL_MARKERS.search(text))
+    has_rhetorical = bool(_RHETORICAL_Q_RE.search(text))
+
+    score = 0.5  # baseline: ambiguous
+    if has_opinion:
+        score += 0.30
+    if has_intensifier:
+        score += 0.15
+    if has_hedging:
+        score += 0.10
+    if has_rhetorical:
+        score += 0.10
+    if has_factual:
+        score -= 0.35
+    score = round(max(0.0, min(1.0, score)), 3)
+
+    if score >= 0.65:
+        label = "subjective"
+    elif score <= 0.35:
+        label = "objective"
+    else:
+        label = "mixed"
+
+    return {
+        "label": label,
+        "score": score,
+        "has_opinion_marker": has_opinion,
+        "has_hedging": has_hedging,
+        "has_intensifier": has_intensifier,
+        "has_rhetorical_question": has_rhetorical,
+    }
+
+def compute_sentiment_intensity(sentiment: str, scores: dict, text: str) -> str:
+    """
+    Classify how strongly the sentiment is expressed.
+    Combines model confidence with presence of linguistic intensifiers.
+    """
+    conf = scores.get(sentiment, 0.0)
+    has_intensifier = bool(_INTENSIFIER_MARKERS.search(text))
+    if conf >= 0.85 or (conf >= 0.75 and has_intensifier):
+        return "strong"
+    elif conf >= 0.65:
+        return "moderate"
+    elif conf >= 0.55:
+        return "mild"
+    else:
+        return "uncertain"
+
+def apply_rhetorical_question_adjustment(
+    text: str,
+    predicted_sentiment: str,
+    sent_scores: dict,
+    heuristics: list,
+) -> tuple:
+    """
+    Rhetorical questions ("Are guns really safe??", "How could they do this?")
+    carry implicit negative or sarcastic sentiment that the model often misses
+    because the surface words may not contain explicit negative markers.
+    """
+    if not _RHETORICAL_Q_RE.search(text):
+        return predicted_sentiment, sent_scores
+
+    # Rhetorical questions typically express frustration/disbelief → negative lean
+    sent_scores = dict(sent_scores)
+    if predicted_sentiment == "Positive" or predicted_sentiment == "Neutral":
+        boost = 0.15
+        sent_scores["Negative"] = min(1.0, sent_scores.get("Negative", 0.0) + boost)
+        total = sum(sent_scores.values())
+        if total > 0:
+            sent_scores = {k: round(v / total, 4) for k, v in sent_scores.items()}
+        new_pred = max(sent_scores, key=sent_scores.get)
+        if new_pred != predicted_sentiment:
+            heuristics.append(f"rhetorical_q_adjustment:{predicted_sentiment}->{new_pred}")
+            predicted_sentiment = new_pred
+        else:
+            heuristics.append("rhetorical_q_negative_lean")
+    return predicted_sentiment, sent_scores
+
+def calibrate_with_vader(
+    text: str,
+    predicted_sentiment: str,
+    sent_scores: dict,
+    heuristics: list,
+) -> tuple:
+    """
+    Cross-check transformer output against VADER's rule-based lexicon scores.
+
+    VADER is especially reliable for:
+    - Clear lexical polarity ("guns are GREAT" vs "guns are terrible")
+    - Short texts where transformer models have less signal
+    - Texts with intensifiers (very, extremely, absolutely)
+
+    Only intervenes when transformer confidence is below 0.65 AND VADER
+    strongly disagrees (compound > 0.4 or < -0.4). This avoids overriding
+    confident transformer predictions with rule-based noise.
+    """
+    vader_scores = vader_analyzer.polarity_scores(text)
+    compound = vader_scores["compound"]
+
+    if compound >= 0.05:
+        vader_label = "Positive"
+    elif compound <= -0.05:
+        vader_label = "Negative"
+    else:
+        vader_label = "Neutral"
+
+    transformer_conf = sent_scores.get(predicted_sentiment, 0.0)
+
+    # Short texts (< 6 words): VADER gets more influence since transformer has less context
+    word_count = len(text.split())
+    vader_weight = 0.18 if word_count < 6 else 0.12
+
+    if vader_label != predicted_sentiment and transformer_conf < 0.65 and abs(compound) > 0.4:
+        sent_scores = dict(sent_scores)
+        blend_amount = vader_weight * abs(compound)
+        sent_scores[vader_label] = min(1.0, sent_scores.get(vader_label, 0.0) + blend_amount)
+        sent_scores[predicted_sentiment] = max(0.0, sent_scores.get(predicted_sentiment, 0.0) - blend_amount * 0.5)
+        total = sum(sent_scores.values())
+        if total > 0:
+            sent_scores = {k: round(v / total, 4) for k, v in sent_scores.items()}
+        new_pred = max(sent_scores, key=sent_scores.get)
+        if new_pred != predicted_sentiment:
+            heuristics.append(f"vader_calibration:{predicted_sentiment}->{new_pred}")
+            predicted_sentiment = new_pred
+        else:
+            heuristics.append("vader_confidence_blend")
+
+    return predicted_sentiment, sent_scores
+
+# ──────────────────────────────────────
 # Model Loading
 # ──────────────────────────────────────
 sentiment_classifier = None
@@ -525,6 +814,8 @@ def _load_pipeline(name: str):
     last_error = None
 
     for candidate in _resolve_model_candidates(name):
+        if not candidate.get("enabled", True) or not candidate.get("model"):
+            continue  # skip disabled / unconfigured candidates (e.g. ModernBERT when path not set)
         attempted.append(candidate["model"])
         try:
             tokenizer = AutoTokenizer.from_pretrained(candidate["model"], use_fast=True)
@@ -595,6 +886,9 @@ def _normalize_sentiment_output(result) -> dict:
     total = sum(scores.values())
     if total > 0:
         scores = {k: round(v / total, 4) for k, v in scores.items()}
+    else:
+        # All-zero scores (degenerate model output) — default to Neutral
+        scores = {"Positive": 0.0, "Neutral": 1.0, "Negative": 0.0}
     return scores
 
 def _extract_label_score(result, positive_labels: set[str]) -> float:
@@ -608,6 +902,8 @@ def _run_stage_batch(model_name: str, texts: list[str], **kwargs) -> tuple[list,
     classifier = model_registry.get(model_name)
     if classifier is None:
         return [None] * len(texts), 0.0
+    if not texts:
+        return [], 0.0
 
     started = time.perf_counter()
     results = classifier(texts, batch_size=min(16, max(1, len(texts))), **kwargs)
@@ -797,7 +1093,13 @@ def apply_confidence_flag(sentiment: str, sent_scores: dict) -> tuple:
 def classify_multi_sentence(text: str, cleaned: str) -> dict:
     """
     For multi-sentence text, classify each sentence individually and aggregate.
-    Returns per-sentence breakdown and overall aggregated scores.
+
+    Uses contrast-weighted aggregation: sentences containing contrast/concession
+    markers (but, however, although, despite, etc.) receive 2x weight because
+    they typically contain the author's actual conclusion/stance after introducing
+    a concession. For example:
+      "The UI is beautiful, but the performance is terrible."
+      → "terrible" clause carries more weight than simple averaging.
     """
     sentences = split_sentences(cleaned)
 
@@ -806,9 +1108,17 @@ def classify_multi_sentence(text: str, cleaned: str) -> dict:
         return None
 
     per_sentence = []
-    agg_scores = {"Positive": 0, "Neutral": 0, "Negative": 0}
+    agg_scores = {"Positive": 0.0, "Neutral": 0.0, "Negative": 0.0}
+    has_contrast = False
+    total_weight = 0.0
 
     for sent_text in sentences:
+        # Contrast marker in this sentence → give it more weight
+        sentence_has_contrast = bool(_CONTRAST_RE.search(sent_text))
+        if sentence_has_contrast:
+            has_contrast = True
+        weight = 2.0 if sentence_has_contrast else 1.0
+
         try:
             sentence_input, _ = truncate_for_model(sent_text, "sentiment")
             result = sentiment_classifier(sentence_input)
@@ -818,34 +1128,39 @@ def classify_multi_sentence(text: str, cleaned: str) -> dict:
             per_sentence.append({
                 "text": sent_text,
                 "sentiment": predicted,
-                "scores": scores
+                "scores": scores,
+                "weight": weight,
+                "has_contrast_marker": sentence_has_contrast,
             })
 
             for k in agg_scores:
-                agg_scores[k] += scores.get(k, 0)
-        except Exception:
+                agg_scores[k] += scores.get(k, 0) * weight
+            total_weight += weight
+        except Exception as exc:
+            LOGGER.warning("Sentence-level classification failed for %r: %s", sent_text[:60], exc)
             per_sentence.append({
                 "text": sent_text,
                 "sentiment": "Neutral",
-                "scores": {"Positive": 0, "Neutral": 1, "Negative": 0}
+                "scores": {"Positive": 0.0, "Neutral": 1.0, "Negative": 0.0},
+                "weight": weight,
+                "has_contrast_marker": sentence_has_contrast,
             })
-            agg_scores["Neutral"] += 1
+            agg_scores["Neutral"] += 1.0 * weight
+            total_weight += weight
 
-    # Average the scores
-    n = len(per_sentence)
-    if n > 0:
-        agg_scores = {k: round(v / n, 4) for k, v in agg_scores.items()}
+    if total_weight > 0:
+        agg_scores = {k: round(v / total_weight, 4) for k, v in agg_scores.items()}
 
     return {
         "sentences": per_sentence,
         "aggregated_scores": agg_scores,
         "aggregated_sentiment": max(agg_scores, key=agg_scores.get),
-        "is_mixed": len(set(s["sentiment"] for s in per_sentence)) > 1
+        "is_mixed": len(set(s["sentiment"] for s in per_sentence)) > 1,
+        "contrast_weighted": has_contrast,
     }
 
 def analyze_word_sentiment(text: str) -> tuple[list, dict]:
     tokens = re.findall(r'\S+|\s+', text)
-    word_analysis = []
     word_counts = {"total": 0, "positive": 0, "neutral": 0, "negative": 0}
     word_positions = []
     word_to_position = {}
@@ -856,8 +1171,6 @@ def analyze_word_sentiment(text: str) -> tuple[list, dict]:
             word_positions.append(token)
             word_to_position.setdefault(token, []).append(position)
             word_counts["total"] += 1
-        else:
-            word_analysis.append({"text": token, "sentiment": "Whitespace"})
 
     seen_counts = Counter()
     rebuilt_analysis = []
@@ -903,19 +1216,26 @@ def _ensure_core_models():
             detail=f"Required models not loaded: {', '.join(missing)}. Please try again later.",
         )
 
-def _build_text_record(text: str) -> dict:
+def _build_text_record(text: str, context: str = "") -> dict:
     cleaned = preprocess_text(text)
+    cleaned_context = preprocess_text(context) if context else ""
+    # Build context-aware model input: context is prepended so the transformer
+    # can attend across both context and text during classification.
+    contextual_input = build_contextual_input(cleaned, cleaned_context)
     record = {
         "text": text,
+        "context": context,
         "cleaned": cleaned,
+        "contextual_input": contextual_input,
         "gibberish": is_gibberish(text),
         "is_english": detect_language_is_english(text),
         "truncation": {},
         "stage_timings_ms": {},
         "heuristics_applied": [],
+        "context_signals": detect_context_signals(text),
     }
     for model_name in MODEL_SPECS:
-        prepared, meta = truncate_for_model(cleaned, model_name)
+        prepared, meta = truncate_for_model(contextual_input, model_name)
         record[f"{model_name}_input"] = prepared
         record["truncation"][model_name] = meta
     return record
@@ -949,10 +1269,12 @@ def _apply_sarcasm_adjustment(record: dict, predicted_sentiment: str, sent_score
         sent_scores["Neutral"] = round(max(0.0, 1.0 - sent_scores["Positive"] - sent_scores["Negative"]), 4)
     return predicted_sentiment, sent_scores, is_sarcastic
 
-def classify_texts_internal(texts: list[str]) -> list[dict]:
+def classify_texts_internal(texts: list[str], contexts: list[str] = None) -> list[dict]:
     _ensure_core_models()
     started = time.perf_counter()
-    records = [_build_text_record(str(text)) for text in texts]
+    if contexts is None:
+        contexts = [""] * len(texts)
+    records = [_build_text_record(str(text), ctx) for text, ctx in zip(texts, contexts)]
 
     sentiment_results, sentiment_ms = _run_stage_batch(
         "sentiment",
@@ -1064,6 +1386,52 @@ def classify_texts_internal(texts: list[str]) -> list[dict]:
             record["sarcasm_score"] = 0.0
             record["heuristics_applied"].append("gibberish_short_circuit")
 
+        # ── Nuclear enrichment pipeline ────────────────────────────────────────
+        # 1. Rhetorical question adjustment (before VADER calibration)
+        record["predicted_sentiment"], record["sent_scores"] = apply_rhetorical_question_adjustment(
+            record["text"], record["predicted_sentiment"], record["sent_scores"],
+            record["heuristics_applied"],
+        )
+
+        # 2. VADER cross-calibration (especially useful for short/ambiguous texts)
+        record["predicted_sentiment"], record["sent_scores"] = calibrate_with_vader(
+            record["text"], record["predicted_sentiment"], record["sent_scores"],
+            record["heuristics_applied"],
+        )
+
+        # 3. Re-evaluate confidence after calibration
+        record["predicted_sentiment"], record["is_uncertain"] = apply_confidence_flag(
+            record["predicted_sentiment"], record["sent_scores"]
+        )
+
+        # 4. Sensitive topic detection — does NOT change sentiment, adds context
+        record["sensitive_topics"] = detect_sensitive_topics(record["text"])
+
+        # 5. Subjectivity analysis
+        record["subjectivity"] = compute_subjectivity(record["text"])
+
+        # 6. Sentiment intensity
+        record["sentiment_intensity"] = compute_sentiment_intensity(
+            record["predicted_sentiment"], record["sent_scores"], record["text"]
+        )
+
+        # 7. Ambivalence — both positive and negative scores are meaningfully elevated
+        pos_conf = record["sent_scores"].get("Positive", 0.0)
+        neg_conf = record["sent_scores"].get("Negative", 0.0)
+        record["is_ambivalent"] = (pos_conf > 0.28 and neg_conf > 0.28)
+
+        # 8. Text quality metadata
+        word_count = len(record["text"].split())
+        record["text_quality"] = {
+            "word_count": word_count,
+            "is_very_short": word_count < 5,
+            "short_text_note": (
+                "Very short text — classification confidence may be lower."
+                if word_count < 5 else None
+            ),
+        }
+        # ── End nuclear enrichment ─────────────────────────────────────────────
+
         word_analysis, word_counts = analyze_word_sentiment(record["text"])
         response = {
             "sentiment": record["predicted_sentiment"],
@@ -1072,7 +1440,9 @@ def classify_texts_internal(texts: list[str]) -> list[dict]:
                 "neutral": record["sent_scores"].get("Neutral", 0),
                 "negative": record["sent_scores"].get("Negative", 0),
             },
+            "sentiment_intensity": record["sentiment_intensity"],
             "is_uncertain": record["is_uncertain"],
+            "is_ambivalent": record["is_ambivalent"],
             "toxicity": round(record.get("toxicity", 0.0), 4),
             "is_toxic": record.get("is_toxic", False),
             "comment_type": record["predicted_type"],
@@ -1084,6 +1454,13 @@ def classify_texts_internal(texts: list[str]) -> list[dict]:
                 for e in record.get("emotions", [])[:5]
             ],
             "is_english": record["is_english"],
+            # Context-awareness fields
+            "context_injected": bool(record.get("context", "")),
+            "context_signals": record.get("context_signals", {}),
+            # Nuance fields
+            "sensitive_topics": record["sensitive_topics"],
+            "subjectivity": record["subjectivity"],
+            "text_quality": record["text_quality"],
             "word_analysis": word_analysis,
             "word_counts": word_counts,
             "latency_ms": per_item_latency_ms,
@@ -1100,13 +1477,14 @@ def classify_texts_internal(texts: list[str]) -> list[dict]:
             response["multi_sentence"] = {
                 "sentences": multi_sentence["sentences"],
                 "is_mixed": multi_sentence["is_mixed"],
+                "contrast_weighted": multi_sentence.get("contrast_weighted", False),
             }
         responses.append(response)
 
     return responses
 
-def classify_text_internal(text: str) -> dict:
-    return classify_texts_internal([text])[0]
+def classify_text_internal(text: str, context: str = "") -> dict:
+    return classify_texts_internal([text], contexts=[context])[0]
 
 # ──────────────────────────────────────
 # Job Store (in-memory)
@@ -1206,13 +1584,19 @@ async def classify_text_endpoint(request: Request):
 
     body = await request.json()
     text = body.get("text", "").strip()
+    # Optional surrounding context: the post/thread/topic being replied to.
+    # When provided it is prepended to the model input so the transformer can
+    # attend across both context and comment during classification.
+    context = body.get("context", "").strip()
 
     if not text:
         raise HTTPException(status_code=400, detail="Please enter a comment. Text field cannot be empty.")
     if len(text) > 8192:
         raise HTTPException(status_code=400, detail="Text exceeds maximum length of 8192 characters.")
+    if len(context) > 2048:
+        raise HTTPException(status_code=400, detail="Context exceeds maximum length of 2048 characters.")
 
-    result = classify_text_internal(text)
+    result = classify_text_internal(text, context=context)
     return JSONResponse(content=result)
 
 @app.post("/classify/file")

@@ -1,17 +1,21 @@
 import { useEffect, useRef } from 'react';
 import anime from 'animejs';
-import { AlertCircle, AlertTriangle, Clock, Minus, Tag, TrendingDown, TrendingUp, Zap } from 'lucide-react';
+import { motion } from 'motion/react';
+import { Tooltip } from '@mantine/core';
+import { AlertCircle, AlertTriangle, Clock, Info, Minus, Tag, TrendingDown, TrendingUp, Zap } from 'lucide-react';
+import CountUp from './CountUp';
 import './SingleResult.css';
 
 export default function SingleResult({ result, runtimeLabel }) {
   const cardRef = useRef(null);
+  const meterBarRef = useRef(null);
 
   useEffect(() => {
     if (!result || !cardRef.current) return;
 
     const root = cardRef.current;
     const stagedNodes = root.querySelectorAll(
-      '.result-heading, .result-flags, .result-main, .confidence-title, .interactive-text-box, .word-summary-stats, .toxicity-bar-container, .confidence-trio'
+      '.result-heading, .result-flags, .result-main, .conf-meter-section, .confidence-title, .interactive-text-box, .word-summary-stats, .toxicity-bar-container, .confidence-trio'
     );
     const bars = root.querySelectorAll('.confidence-bar-fill, .conf-bar-fill');
 
@@ -41,11 +45,23 @@ export default function SingleResult({ result, runtimeLabel }) {
       easing: 'easeOutQuart',
     }, '-=240');
 
+    // Animate confidence strip fill with scaleX (layout-independent)
+    if (meterBarRef.current) {
+      anime.remove(meterBarRef.current);
+      anime.timeline({ easing: 'easeOutExpo' }).add({
+        targets: meterBarRef.current,
+        scaleX: [0, 1],
+        duration: 900,
+        delay: 300,
+      });
+    }
+
     return () => {
       timeline.pause();
       anime.remove(root);
       anime.remove(stagedNodes);
       anime.remove(bars);
+      if (meterBarRef.current) anime.remove(meterBarRef.current);
     };
   }, [result]);
 
@@ -71,6 +87,10 @@ export default function SingleResult({ result, runtimeLabel }) {
   const confNeu = Math.round((confidence.neutral || 0) * 100);
   const confNeg = Math.round((confidence.negative || 0) * 100);
 
+  const topConfidence = label === 'Positive' ? confPos : label === 'Negative' ? confNeg : confNeu;
+  const isLowConfidence = topConfidence < 65 || isUncertain;
+  const meterColor = topConfidence >= 75 ? 'var(--positive)' : topConfidence >= 50 ? '#f59e0b' : 'var(--negative)';
+
   function getWordClass(sentiment) {
     if (sentiment === 'Positive') return 'highlight-positive';
     if (sentiment === 'Negative') return 'highlight-negative';
@@ -80,7 +100,6 @@ export default function SingleResult({ result, runtimeLabel }) {
 
   return (
     <div ref={cardRef} className="single-result glass-card" role="region" aria-label="Classification result">
-      <h3 className="result-heading">Classification Result</h3>
 
       {(isUncertain || isSarcastic || !isEnglish) && (
         <div className="result-flags">
@@ -107,8 +126,8 @@ export default function SingleResult({ result, runtimeLabel }) {
 
       <div className="result-main">
         <div className="result-pill-group">
-          <span className={`result-label-pill label-pill ${labelClass}`}>
-            <LabelIcon size={16} />
+          <span className={`result-label-pill label-pill label-pill--hero ${labelClass}`}>
+            <LabelIcon size={20} />
             {label}
           </span>
 
@@ -134,10 +153,38 @@ export default function SingleResult({ result, runtimeLabel }) {
             {runtimeLabel}
           </div>
         </div>
+
+        {/* ── Confidence strip ───────────────────────────────────────── */}
+        <Tooltip
+          label={isLowConfidence ? 'Low confidence — interpret with caution' : 'Model confidence in this classification'}
+          position="top-start"
+          withArrow
+        >
+          <div className="conf-strip">
+            <span className="conf-strip-label">Confidence</span>
+            <div className="conf-strip-track">
+              <div
+                ref={meterBarRef}
+                className="conf-strip-fill"
+                style={{ background: meterColor, width: `${topConfidence}%` }}
+              />
+            </div>
+            <span className="conf-strip-pct" style={{ color: meterColor }}>
+              <CountUp to={topConfidence} duration={0.9} delay={0.3} />%
+            </span>
+            {isLowConfidence && (
+              <motion.span
+                className="conf-strip-dot"
+                animate={{ opacity: [1, 0.3, 1] }}
+                transition={{ duration: 1.8, repeat: Infinity, ease: 'easeInOut' }}
+              />
+            )}
+          </div>
+        </Tooltip>
       </div>
 
       <div className="word-analysis-section">
-        <h4 className="confidence-title">Lexical Sentiment Breakdown</h4>
+        <h4 className="confidence-title">Word breakdown</h4>
 
         {wordAnalysis.length > 0 ? (
           <>
@@ -190,26 +237,6 @@ export default function SingleResult({ result, runtimeLabel }) {
               </div>
             )}
 
-            <div className="confidence-trio" aria-label={`Confidence: ${confPos}% positive, ${confNeu}% neutral, ${confNeg}% negative`}>
-              <div className="conf-bar-item">
-                <div className="conf-bar-track">
-                  <div className="conf-bar-fill conf-fill-pos" style={{ width: `${confPos}%` }} />
-                </div>
-                <span className="conf-bar-label">{confPos}%</span>
-              </div>
-              <div className="conf-bar-item">
-                <div className="conf-bar-track">
-                  <div className="conf-bar-fill conf-fill-neu" style={{ width: `${confNeu}%` }} />
-                </div>
-                <span className="conf-bar-label">{confNeu}%</span>
-              </div>
-              <div className="conf-bar-item">
-                <div className="conf-bar-track">
-                  <div className="conf-bar-fill conf-fill-neg" style={{ width: `${confNeg}%` }} />
-                </div>
-                <span className="conf-bar-label">{confNeg}%</span>
-              </div>
-            </div>
           </>
         ) : (
           <div className="empty-state-note">

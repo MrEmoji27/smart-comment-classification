@@ -1,36 +1,37 @@
-@import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap');
+@import url('https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap');
 
 :root {
-  --bg-primary: #0d1117;
-  --bg-secondary: #0a0e14;
-  --bg-card: #161b22;
-  --bg-card-hover: #1c2230;
-  --bg-input: #0d1117;
-  --border-default: #30363d;
-  --border-focus: #58a6ff;
+  /* Deep charcoal with a barely-there warm tint — not GitHub */
+  --bg-primary:    oklch(11% 0.012 245);
+  --bg-secondary:  oklch(9%  0.010 245);
+  --bg-card:       oklch(15% 0.014 248);
+  --bg-card-hover: oklch(18% 0.016 248);
+  --bg-input:      oklch(11% 0.012 245);
+  --border-default:oklch(30% 0.016 248);
+  --border-focus:  oklch(66% 0.19  270);
 
-  --accent-blue: #58a6ff;
-  --accent-blue-dark: #1e6fd9;
-  --accent-gradient: linear-gradient(135deg, #1e6fd9, #58a6ff);
+  /* Violet-leaning blue — perceptibly different from GitHub's sky #58a6ff */
+  --accent-blue:      oklch(66% 0.19 270);
+  --accent-blue-dark: oklch(50% 0.22 272);
+  --accent-gradient:  linear-gradient(135deg, oklch(50% 0.22 272), oklch(66% 0.19 270));
 
-  --positive: #3fb950;
-  --positive-bg: rgba(63, 185, 80, 0.12);
-  --negative: #f85149;
-  --negative-bg: rgba(248, 81, 73, 0.12);
-  --neutral: #d29922;
-  --neutral-bg: rgba(210, 153, 34, 0.12);
+  --positive: oklch(72% 0.19  142);
+  --positive-bg: oklch(72% 0.19 142 / 0.13);
+  --negative: oklch(62% 0.22   25);
+  --negative-bg: oklch(62% 0.22 25 / 0.13);
+  --neutral:  oklch(76% 0.14   80);
+  --neutral-bg: oklch(76% 0.14 80 / 0.13);
 
-  --text-primary: #e6edf3;
-  --text-secondary: #8b949e;
-  --text-muted: #7d8590;
-  --text-link: #58a6ff;
+  --text-primary:   oklch(92% 0.008 248);
+  --text-secondary: oklch(58% 0.012 248);
+  --text-muted:     oklch(50% 0.010 248);
+  --text-link:      oklch(66% 0.19  270);
 
-  --shadow-sm: 0 1px 3px rgba(0, 0, 0, 0.4);
-  --shadow-md: 0 4px 16px rgba(0, 0, 0, 0.5);
-  --shadow-lg: 0 8px 32px rgba(0, 0, 0, 0.6);
-  --shadow-glow: 0 0 20px rgba(88, 166, 255, 0.15);
+  --shadow-sm: 0 1px 3px  oklch(0% 0 0 / 0.4);
+  --shadow-md: 0 4px 16px oklch(0% 0 0 / 0.5);
+  --shadow-lg: 0 8px 32px oklch(0% 0 0 / 0.6);
 
-  --font-primary: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+  --font-primary: 'Plus Jakarta Sans', -apple-system, BlinkMacSystemFont, sans-serif;
   --font-mono: 'JetBrains Mono', 'Fira Code', monospace;
 
   --radius-sm: 6px;
@@ -45,34 +46,33 @@
 }
 
 :root[data-theme='light'] {
-  --bg-primary: #f6f8fb;
-  --bg-secondary: #eef2f7;
-  --bg-card: rgba(255, 255, 255, 0.88);
-  --bg-card-hover: #ffffff;
-  --bg-input: #ffffff;
-  --border-default: #d0d7e2;
-  --border-focus: #1e6fd9;
+  --bg-primary:    oklch(97% 0.008 248);
+  --bg-secondary:  oklch(94% 0.010 248);
+  --bg-card:       oklch(99% 0.004 248);
+  --bg-card-hover: oklch(100% 0 0);
+  --bg-input:      oklch(100% 0 0);
+  --border-default:oklch(88% 0.012 248);
+  --border-focus:  oklch(50% 0.22 272);
 
-  --accent-blue: #1e6fd9;
-  --accent-blue-dark: #1553ab;
-  --accent-gradient: linear-gradient(135deg, #1553ab, #58a6ff);
+  --accent-blue:      oklch(50% 0.22 272);
+  --accent-blue-dark: oklch(40% 0.23 272);
+  --accent-gradient:  linear-gradient(135deg, oklch(40% 0.23 272), oklch(56% 0.21 270));
 
-  --positive: #1f883d;
-  --positive-bg: rgba(31, 136, 61, 0.1);
-  --negative: #cf222e;
-  --negative-bg: rgba(207, 34, 46, 0.1);
-  --neutral: #9a6700;
-  --neutral-bg: rgba(154, 103, 0, 0.1);
+  --positive: oklch(46% 0.16 142);
+  --positive-bg: oklch(46% 0.16 142 / 0.10);
+  --negative: oklch(48% 0.20  25);
+  --negative-bg: oklch(48% 0.20 25 / 0.10);
+  --neutral:  oklch(52% 0.12  80);
+  --neutral-bg: oklch(52% 0.12 80 / 0.10);
 
-  --text-primary: #1f2328;
-  --text-secondary: #57606a;
-  --text-muted: #6e7781;
-  --text-link: #0969da;
+  --text-primary:   oklch(18% 0.010 248);
+  --text-secondary: oklch(46% 0.012 248);
+  --text-muted:     oklch(54% 0.010 248);
+  --text-link:      oklch(50% 0.22  272);
 
-  --shadow-sm: 0 1px 3px rgba(15, 23, 42, 0.08);
-  --shadow-md: 0 10px 24px rgba(15, 23, 42, 0.08);
-  --shadow-lg: 0 18px 40px rgba(15, 23, 42, 0.14);
-  --shadow-glow: 0 0 20px rgba(30, 111, 217, 0.12);
+  --shadow-sm: 0 1px 3px  oklch(15% 0.01 248 / 0.08);
+  --shadow-md: 0 10px 24px oklch(15% 0.01 248 / 0.08);
+  --shadow-lg: 0 18px 40px oklch(15% 0.01 248 / 0.14);
 }
 
 *,
@@ -123,9 +123,7 @@ body {
 }
 
 .glass-card {
-  background: color-mix(in srgb, var(--bg-card) 92%, transparent);
-  backdrop-filter: blur(16px);
-  -webkit-backdrop-filter: blur(16px);
+  background: var(--bg-card);
   border: 1px solid var(--border-default);
   border-radius: var(--radius-lg);
   box-shadow: var(--shadow-md);
@@ -165,7 +163,7 @@ body {
 }
 
 .btn-primary:hover {
-  box-shadow: var(--shadow-glow);
+  box-shadow: var(--shadow-md);
   transform: translateY(-1px);
 }
 

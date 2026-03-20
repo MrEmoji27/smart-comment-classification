@@ -15,6 +15,7 @@
     "animejs": "^3.2.2",
     "axios": "^1.13.6",
     "lucide-react": "^0.577.0",
+    "motion": "^12.38.0",
     "papaparse": "^5.5.3",
     "react": "^19.2.4",
     "react-bits": "^1.0.5",

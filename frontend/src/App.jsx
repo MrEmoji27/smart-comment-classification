@@ -2,6 +2,7 @@ import { Suspense, lazy, useEffect, useMemo, useState } from 'react';
 import axios from 'axios';
 import { Alert, MantineProvider, createTheme } from '@mantine/core';
 import { AlertCircle } from 'lucide-react';
+import { AnimatePresence, motion } from 'motion/react';
 import NavBar from './components/NavBar';
 import TextInput from './components/TextInput';
 import SingleResult from './components/SingleResult';
@@ -18,6 +19,13 @@ const EXAMPLE_COMMENTS = [
   'smh worst update ever, nothing works anymore',
   'How do I export my data to CSV?',
 ];
+
+const viewTransition = {
+  initial: { opacity: 0, y: 12 },
+  animate: { opacity: 1, y: 0 },
+  exit: { opacity: 0, y: -8 },
+  transition: { duration: 0.28, ease: [0.16, 1, 0.3, 1] },
+};
 
 export default function App() {
   const [mode, setMode] = useState('text');
@@ -183,81 +191,115 @@ export default function App() {
         onModeChange={handleModeChange}
         theme={theme}
         onThemeToggle={toggleTheme}
-        runtimeLabel={runtimeLabel}
         backendStatus={backendStatus}
       />
 
       <main id="main-content" className="app-layout">
         <div className="layout-col">
-          {mode === 'text' ? (
-            <TextInput
-              onClassify={handleClassifyText}
-              loading={loading}
-              hasResult={Boolean(singleResult)}
-              onClear={handleClear}
-            />
-          ) : (
-            <Suspense fallback={<div className="empty-results-state animate-fade-in"><p className="empty-state-hint">Loading file tools...</p></div>}>
-              <>
-                <FileUpload onClassify={handleClassifyFile} loading={loading} />
-                {loading && !batchResults && (
-                  <div
-                    className="progress-container glass-card animate-fade-in mt-4"
-                    role="progressbar"
-                    aria-valuenow={progress}
-                    aria-valuemin={0}
-                    aria-valuemax={100}
-                    aria-label="File processing progress"
-                  >
-                    <div className="progress-text">
-                      <span>Processing file...</span>
-                      <span>{progress}%</span>
-                    </div>
-                    <div className="progress-bar-bg">
-                      <div className="progress-bar-fill" style={{ width: `${progress}%` }} />
-                    </div>
-                  </div>
-                )}
-              </>
-            </Suspense>
-          )}
+          <AnimatePresence mode="wait" initial={false}>
+            {mode === 'text' ? (
+              <motion.div key="text-mode" {...viewTransition}>
+                <TextInput
+                  onClassify={handleClassifyText}
+                  loading={loading}
+                  hasResult={Boolean(singleResult)}
+                  onClear={handleClear}
+                />
+              </motion.div>
+            ) : (
+              <motion.div key="file-mode" {...viewTransition}>
+                <Suspense fallback={<div className="empty-results-state animate-fade-in"><p className="empty-state-hint">Loading file tools...</p></div>}>
+                  <>
+                    <FileUpload onClassify={handleClassifyFile} loading={loading} />
+                    <AnimatePresence initial={false}>
+                      {loading && !batchResults && (
+                        <motion.div
+                          key="file-progress"
+                          className="progress-container glass-card animate-fade-in mt-4"
+                          role="progressbar"
+                          aria-valuenow={progress}
+                          aria-valuemin={0}
+                          aria-valuemax={100}
+                          aria-label="File processing progress"
+                          initial={{ opacity: 0, y: 10 }}
+                          animate={{ opacity: 1, y: 0 }}
+                          exit={{ opacity: 0, y: -8 }}
+                          transition={{ duration: 0.22, ease: [0.16, 1, 0.3, 1] }}
+                        >
+                          <div className="progress-text">
+                            <span>Processing file...</span>
+                            <span>{progress}%</span>
+                          </div>
+                          <div className="progress-bar-bg">
+                            <div className="progress-bar-fill" style={{ width: `${progress}%` }} />
+                          </div>
+                        </motion.div>
+                      )}
+                    </AnimatePresence>
+                  </>
+                </Suspense>
+              </motion.div>
+            )}
+          </AnimatePresence>
         </div>
 
         <div className="layout-col">
-          {mode === 'text' && singleResult && (
-            <SingleResult result={singleResult} runtimeLabel={runtimeLabel} />
-          )}
+          <AnimatePresence mode="wait" initial={false}>
+            {mode === 'text' && singleResult && (
+              <motion.div key={`single-${labelKey(singleResult)}`} {...viewTransition}>
+                <SingleResult result={singleResult} runtimeLabel={runtimeLabel} />
+              </motion.div>
+            )}
 
-          {mode === 'file' && batchResults && (
-            <Suspense fallback={<div className="empty-results-state animate-fade-in"><p className="empty-state-hint">Loading batch results...</p></div>}>
-              <BatchResults results={batchResults} originalFile={batchFile} />
-            </Suspense>
-          )}
+            {mode === 'file' && batchResults && (
+              <motion.div key={`batch-${batchResults.length}`} {...viewTransition}>
+                <Suspense fallback={<div className="empty-results-state animate-fade-in"><p className="empty-state-hint">Loading batch results...</p></div>}>
+                  <BatchResults results={batchResults} originalFile={batchFile} />
+                </Suspense>
+              </motion.div>
+            )}
 
-          {!singleResult && !batchResults && !loading && mode === 'text' && (
-            <div className="empty-results-state animate-fade-in" role="region" aria-label="Try an example">
-              <div className="empty-state-content">
-                <p className="empty-state-title">Try an example</p>
-                <div className="example-comments">
-                  {EXAMPLE_COMMENTS.map((comment) => (
-                    <button
-                      key={comment}
-                      className="example-btn"
-                      onClick={() => handleClassifyText(comment)}
-                    >
-                      "{comment}"
-                    </button>
-                  ))}
+            {!singleResult && !batchResults && !loading && mode === 'text' && (
+              <motion.div
+                key="empty-text"
+                className="empty-results-state animate-fade-in"
+                role="region"
+                aria-label="Try an example"
+                initial={{ opacity: 0, y: 12 }}
+                animate={{ opacity: 1, y: 0 }}
+                exit={{ opacity: 0, y: -8 }}
+                transition={{ duration: 0.24, ease: [0.16, 1, 0.3, 1] }}
+              >
+                <div className="empty-state-content">
+                  <p className="empty-state-title">Try an example</p>
+                  <div className="example-comments">
+                    {EXAMPLE_COMMENTS.map((comment) => (
+                      <button
+                        key={comment}
+                        className="example-btn"
+                        onClick={() => handleClassifyText(comment)}
+                      >
+                        "{comment}"
+                      </button>
+                    ))}
+                  </div>
                 </div>
-              </div>
-            </div>
-          )}
+              </motion.div>
+            )}
 
-          {!singleResult && !batchResults && !loading && mode === 'file' && (
-            <div className="empty-results-state animate-fade-in">
-              <p className="empty-state-hint">Upload a file to see batch results here.</p>
-            </div>
-          )}
+            {!singleResult && !batchResults && !loading && mode === 'file' && (
+              <motion.div
+                key="empty-file"
+                className="empty-results-state animate-fade-in"
+                initial={{ opacity: 0, y: 12 }}
+                animate={{ opacity: 1, y: 0 }}
+                exit={{ opacity: 0, y: -8 }}
+                transition={{ duration: 0.24, ease: [0.16, 1, 0.3, 1] }}
+              >
+                <p className="empty-state-hint">Upload a file to see batch results here.</p>
+              </motion.div>
+            )}
+          </AnimatePresence>
         </div>
       </main>
 
@@ -276,4 +318,12 @@ export default function App() {
       <Footer runtimeLabel={runtimeLabel} backendStatus={backendStatus} />
     </MantineProvider>
   );
+}
+
+function labelKey(result) {
+  return [
+    result?.sentiment || result?.label || 'unknown',
+    result?.comment_type || 'type',
+    result?.latency_ms || 'latency',
+  ].join('-');
 }
